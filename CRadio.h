@@ -1,0 +1,144 @@
+#pragma once
+#include "portaudio.h"
+#include <complex>
+#include <thread>
+#include <windows.h>
+#include <ipp.h>
+
+//modes
+//0 = IDLE
+//1 = RX USB
+//2 = RX LSB
+//3 = RX CW
+//4 = TX USB
+//5 = TX LSB
+//6 = TX CW
+#define IDLE_MODE 0
+#define RX_MODE 1
+#define TX_MODE 2
+#define VNA_MODE 3
+
+class MyFrame;
+
+struct AntTuneCal {
+	Ipp32fc SweptOpen[36];
+	Ipp32fc SweptShort[36];
+	Ipp32fc SweptLoad[36];
+};
+
+struct RadioStatus {
+	float RXFreq;
+	float TunerFreq;
+	float SWRTuned[36];
+	float SWRUntuned[36];
+	float SmithChartTuned[72]; // x,y coords
+	float SmithChartUntuned[72]; // x,y coords
+	int Sunit;
+	int mode;
+	float volts;
+	float amps;
+	char GMTTime[16];
+	float AudioFreqPlot[16];
+	float AudioTimePlot[128];
+	float RFFreqPlot[256];
+	bool UpdateText;
+	bool UpdateAudio;
+	bool UpdateVSWR;
+	bool UpdateRFPlot;
+};
+
+class CRadio
+{
+public:
+	CRadio();
+	~CRadio() ;
+	int Connect();
+	bool connected;
+	int UpdatePlot();
+	int DataThread();
+	void RXDataLoop();
+	void TXDataLoop();
+	void AntTuneDataLoop();
+
+	Ipp32fc GetS11(Ipp32f* H2Window);
+	void AntTuneSweepOSL(int osl);
+
+
+	int RelaySettings;
+	int comPort;
+	bool SaveSettings(const char* path);
+	bool LoadSettings(const char* path);
+	int SetRXBits();
+//	int DoAudioFFT();
+
+	void ProcessIQ(char* data); // Change 4, 6-bit values into a float
+	void DoRXDSP(bool bypassALC); // Change 4, 6-bit values into a float
+	int SetFreq(float freqMHz);
+	void UpdateADCs(char* readData);
+
+	std::thread myAThread;
+	std::thread myDThread;
+
+	int AudioInputChannels;
+	int AudioOutputChannels;
+
+	MyFrame* theFrame;
+	RadioStatus* myStatus;
+	AntTuneCal* myVNACal;
+	HANDLE hSerial;
+
+	Ipp32f* audioInBuf;
+	Ipp32f* audioOutBuf;
+	Ipp32f* resampledAudioOut;
+	Ipp32f* resampledAudioIn;
+	void Get1280AudioSamples(float gain);
+	IppsResamplingPolyphase_32f* resample_state;
+
+	float LOfreq;
+	bool NewLOFreq;
+
+	Ipp32f* MagData ;
+	Ipp32f* MagMinAccumData;
+	Ipp32f* MagAccumData;
+	bool ClearMagAccum;
+	Ipp32f* LogMagData;
+	int m_iFreq;
+
+	Ipp32fc* RawIQData;// = new Ipp32fc[16000];
+	Ipp32fc* TunerData;// = new Ipp32fc[16000];
+	Ipp32f TunerPhase;
+	Ipp32f TunerMag;
+	float TunerFreq;
+	Ipp32f* HannWindow;// = new Ipp32f[250];
+	Ipp32f* TXHannWindow;// = new Ipp32f[2048];
+	Ipp32fc* WindowedData;// = new Ipp32fc[250];
+	Ipp32fc* DFTData;// = new Ipp32fc[250];
+	IppsDFTSpec_C_32fc* pDFTSpec;
+	Ipp8u* pDFTWorkBuf;
+	Ipp8u* pTXFFTWorkBuf;
+
+	Ipp32fc* TXFFTData;
+	Ipp32f* RaisedCosUpDown;// = new Ipp32f[2048];
+	void BuildGainRamp(float* ramp, float GainPA, float GainAB, float GainBC);
+
+	IppsFFTSpec_C_32fc* pFFTSpec;
+	Ipp8u* pFFTSpecBuf, * pFFTWorkBuf;
+
+	Ipp32fc* IFFTData;// = new Ipp32fc[16000];
+	Ipp32fc* IFFTAccum;// = new Ipp32fc[16000];
+	Ipp32f* RawAudio;
+
+
+	int IQWriteAddr;
+	int IQReadAddr;
+
+	int audioInWrPtr;
+	int audioInRdPtr;
+	int audioOutWrPtr;
+	int audioOutRdPtr;
+	char dbgText[16];
+	bool audioOutStarted;
+
+
+};
+

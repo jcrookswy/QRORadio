@@ -1,0 +1,17 @@
+# Build output
+Debug/
+Release/
+x64/
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+
+# Runtime config / debug data
+comport.txt
+debug.txt
+debugData.csv
+compress.txt
+
+# Archives
+*.zip
