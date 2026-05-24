@@ -132,10 +132,22 @@ bool CRadio::SaveSettings(const char* path)
     FILE* f = nullptr;
     fopen_s(&f, path, "w");
     if (!f) return false;
+
     fprintf(f, "{\n");
     fprintf(f, "  \"comPort\": %d,\n", comPort);
     fprintf(f, "  \"LOfreq\": %f,\n", LOfreq);
-    fprintf(f, "  \"RelaySettings\": %d\n", RelaySettings);
+    fprintf(f, "  \"RelaySettings\": %d,\n", RelaySettings);
+
+    const char*  names[]  = { "SweptOpen", "SweptShort", "SweptLoad" };
+    Ipp32fc*     arrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad };
+    for (int a = 0; a < 3; a++)
+    {
+        fprintf(f, "  \"%s\": [\n", names[a]);
+        for (int i = 0; i < 36; i++)
+            fprintf(f, "    [%f, %f]%s\n", arrays[a][i].re, arrays[a][i].im, i < 35 ? "," : "");
+        fprintf(f, "  ]%s\n", a < 2 ? "," : "");
+    }
+
     fprintf(f, "}\n");
     fclose(f);
     return true;
@@ -146,13 +158,27 @@ bool CRadio::LoadSettings(const char* path)
     FILE* f = nullptr;
     fopen_s(&f, path, "r");
     if (!f) return false;
+
+    Ipp32fc* calArrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad };
+    int calSection = -1; // 0=Open 1=Short 2=Load
+    int calIdx = 0;
+
     char line[256];
     while (fgets(line, sizeof(line), f))
     {
-        int ival; float fval;
-        if      (sscanf_s(line, " \"comPort\": %d",      &ival) == 1) comPort      = ival;
-        else if (sscanf_s(line, " \"LOfreq\": %f",       &fval) == 1) LOfreq       = fval;
-        else if (sscanf_s(line, " \"RelaySettings\": %d",&ival) == 1) RelaySettings = ival;
+        int ival; float fval, re, im;
+        if      (sscanf_s(line, " \"comPort\": %d",       &ival) == 1) comPort       = ival;
+        else if (sscanf_s(line, " \"LOfreq\": %f",        &fval) == 1) LOfreq        = fval;
+        else if (sscanf_s(line, " \"RelaySettings\": %d", &ival) == 1) RelaySettings = ival;
+        else if (strstr(line, "\"SweptOpen\""))  { calSection = 0; calIdx = 0; }
+        else if (strstr(line, "\"SweptShort\"")) { calSection = 1; calIdx = 0; }
+        else if (strstr(line, "\"SweptLoad\""))  { calSection = 2; calIdx = 0; }
+        else if (calSection >= 0 && calIdx < 36 && sscanf_s(line, " [%f , %f]", &re, &im) == 2)
+        {
+            calArrays[calSection][calIdx].re = re;
+            calArrays[calSection][calIdx].im = im;
+            calIdx++;
+        }
     }
     fclose(f);
     return true;
