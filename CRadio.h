@@ -63,6 +63,8 @@ public:
 
 	Ipp32fc GetS11(Ipp32f* H2Window);
 	void AntTuneSweepOSL(int osl);
+	Ipp32fc GetCorrectedS11(int index, Ipp32fc S11Raw);
+	void SweepAntTune();
 
 
 	int RelaySettings;

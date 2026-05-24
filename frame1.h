@@ -99,6 +99,8 @@ enum {
     ID_SWEEP_OPEN,
     ID_SWEEP_SHORT,
     ID_SWEEP_LOAD,
+    ID_SWEEP_TUNER,
+    ID_SWEEP_ANTENNA,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -152,6 +154,8 @@ public:
     void OnSweepOpen(wxCommandEvent& event);
     void OnSweepShort(wxCommandEvent& event);
     void OnSweepLoad(wxCommandEvent& event);
+    void OnSweepTuner(wxCommandEvent& event);
+    void OnSweepAntenna(wxCommandEvent& event);
     void UpdateDebugText(char* text);
 
     CRadio* myRadio;

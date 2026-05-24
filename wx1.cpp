@@ -445,6 +445,9 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->Append(ID_SWEEP_OPEN,  _("Sweep &Open"));
     radioMenu->Append(ID_SWEEP_SHORT, _("Sweep &Short"));
     radioMenu->Append(ID_SWEEP_LOAD,  _("Sweep &Load"));
+    radioMenu->AppendSeparator();
+    radioMenu->Append(ID_SWEEP_TUNER,   _("Sweep &Tuner"));
+    radioMenu->Append(ID_SWEEP_ANTENNA, _("Sweep &Antenna"));
     menuBar->Append(radioMenu, _("&Radio"));
     this->SetMenuBar(menuBar);
     Bind(wxEVT_MENU, &MyFrame::OnFileLoad,   this, wxID_OPEN);
@@ -453,6 +456,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnSweepOpen,  this, ID_SWEEP_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepShort, this, ID_SWEEP_SHORT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
+    Bind(wxEVT_MENU, &MyFrame::OnSweepTuner,   this, ID_SWEEP_TUNER);
+    Bind(wxEVT_MENU, &MyFrame::OnSweepAntenna, this, ID_SWEEP_ANTENNA);
 
     myRadio = new CRadio();//Do this after frame exists
 
@@ -661,6 +666,14 @@ void MyFrame::OnSweepShort(wxCommandEvent& event) {
 }
 void MyFrame::OnSweepLoad(wxCommandEvent& event)  {
     myRadio->myStatus->calMode = 2;
+    myRadio->myStatus->mode = 3;
+}
+void MyFrame::OnSweepTuner(wxCommandEvent& event) {
+    myRadio->myStatus->calMode = 4; // Special mode for sweeping tuner w load
+    myRadio->myStatus->mode = 3;
+}
+void MyFrame::OnSweepAntenna(wxCommandEvent& event) {
+    myRadio->myStatus->calMode = 5;
     myRadio->myStatus->mode = 3;
 }
 
