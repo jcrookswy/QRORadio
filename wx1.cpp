@@ -651,9 +651,18 @@ void MyFrame::OnSetComPort(wxCommandEvent& event)
     myRadio->comPort = (int)port;
 }
 
-void MyFrame::OnSweepOpen(wxCommandEvent& event)  { myRadio->AntTuneSweepOSL(0); }
-void MyFrame::OnSweepShort(wxCommandEvent& event) { myRadio->AntTuneSweepOSL(1); }
-void MyFrame::OnSweepLoad(wxCommandEvent& event)  { myRadio->AntTuneSweepOSL(2); }
+void MyFrame::OnSweepOpen(wxCommandEvent& event)  {
+    myRadio->myStatus->calMode = 0;
+    myRadio->myStatus->mode = 3;
+}
+void MyFrame::OnSweepShort(wxCommandEvent& event) {
+    myRadio->myStatus->calMode = 1;
+    myRadio->myStatus->mode = 3;
+}
+void MyFrame::OnSweepLoad(wxCommandEvent& event)  {
+    myRadio->myStatus->calMode = 2;
+    myRadio->myStatus->mode = 3;
+}
 
 void MyFrame::OnPaint(wxPaintEvent& event)
 {
@@ -712,6 +721,7 @@ void MyFrame::B2Click(wxCommandEvent& event) // Dis 24V
 
 void MyFrame::B3Click(wxCommandEvent& event) // ANT TUNE
 {
+    myRadio->myStatus->calMode = 3;
     myRadio->myStatus->mode = 3; // VNA mode. Completes and returns to RX mode.
 }
 

@@ -124,6 +124,8 @@ void InitStatus(RadioStatus* s)
     for (int i = 0; i < 16; i++) s->AudioFreqPlot[i] = 0.0;
     for (int i = 0; i < 128; i++) s->AudioTimePlot[i] = 0.0;
     for (int i = 0; i < 256; i++) s->RFFreqPlot[i] = -20.0;
+
+    s->calMode = 0;
  
 }
 
@@ -983,13 +985,13 @@ void CRadio::AntTuneSweepOSL(int osl)
 		myStatus->SmithChartUntuned[ifrq * 2] = S11.re;
 		myStatus->SmithChartUntuned[ifrq * 2 + 1] = S11.im;
 		myStatus->SWRUntuned[ifrq] = (1.0 + Rmag) / (1.0 - Rmag);
-	}
+        myStatus->UpdateVSWR = true;
+    }
 
     if (osl == 0) memcpy(&myVNACal->SweptOpen[0], &myStatus->SmithChartUntuned[0], 72 * 4);
     if (osl == 1) memcpy(&myVNACal->SweptShort[0], &myStatus->SmithChartUntuned[0], 72 * 4);
     if (osl == 2) memcpy(&myVNACal->SweptLoad[0], &myStatus->SmithChartUntuned[0], 72 * 4);
 
-    myStatus->UpdateVSWR = true;
     SetFreq(lastLO);
 
     SetRXBits();
@@ -1003,6 +1005,11 @@ void CRadio::AntTuneSweepOSL(int osl)
 
 void CRadio::AntTuneDataLoop()
 {
+    if (myStatus->calMode < 3)
+    {
+        AntTuneSweepOSL(myStatus->calMode);
+        return;
+    }
     DWORD WriteData4[16];
     char writeData[64];
     char readData[64];

@@ -35,6 +35,7 @@ struct RadioStatus {
 	float SmithChartUntuned[72]; // x,y coords
 	int Sunit;
 	int mode;
+	int calMode;
 	float volts;
 	float amps;
 	char GMTTime[16];
