@@ -96,6 +96,17 @@ static int patestCallback(const void* inputBuffer, void* outputBuffer,
 #define SAMPLE_RATE (48000)
 //#define SAMPLE_RATE (16000)
 //static paTestData data;
+
+// CESSB: overlap-save block processing at 48 kHz
+// FFT size 2048, block advance 1280, overlap history 768
+// Bandpass 300-2695 Hz (bins 13-115 of 2048-pt FFT at 48 kHz)
+#define CESSB_BLOCK     1280
+#define CESSB_FFT_ORDER 11
+#define CESSB_FFT_N     (1 << CESSB_FFT_ORDER)  // 2048
+#define CESSB_OVERLAP   (CESSB_FFT_N - CESSB_BLOCK)  // 768
+#define CESSB_BIN_LOW   13   // 304.7 Hz
+#define CESSB_BIN_HIGH  115  // 2695.3 Hz
+
 PaStream* stream;
 PaError err;
 void InitStatus(RadioStatus* s)
@@ -299,6 +310,24 @@ CRadio::CRadio()
     }
     InitStatus(myStatus);
 
+    // CESSB overlap-save buffers
+    cessbRealOverlap  = ippsMalloc_32f(CESSB_OVERLAP);
+    cessbCplxOverlap1 = ippsMalloc_32fc(CESSB_OVERLAP);
+    cessbCplxOverlap2 = ippsMalloc_32fc(CESSB_OVERLAP);
+    cessbWorkBuf      = ippsMalloc_32fc(CESSB_FFT_N);
+
+    // 2048-pt FFT for CESSB (order 11, forward divides by N)
+    int sizeCFFTSpec, sizeCFFTInitBuf, sizeCFFTWorkBuf;
+    ippsFFTGetSize_C_32fc(CESSB_FFT_ORDER, IPP_FFT_DIV_FWD_BY_N,
+        ippAlgHintAccurate, &sizeCFFTSpec, &sizeCFFTInitBuf, &sizeCFFTWorkBuf);
+    cessbFFTSpecBuf = ippsMalloc_8u(sizeCFFTSpec);
+    Ipp8u* cessbInitBuf = ippsMalloc_8u(sizeCFFTInitBuf);
+    cessbFFTWorkBuf = ippsMalloc_8u(sizeCFFTWorkBuf);
+    ippsFFTInit_C_32fc(&cessbFFTSpec, CESSB_FFT_ORDER, IPP_FFT_DIV_FWD_BY_N,
+        ippAlgHintAccurate, cessbFFTSpecBuf, cessbInitBuf);
+    if (cessbInitBuf) ippFree(cessbInitBuf);
+
+    InitCESSB();
 }
 
 CRadio::~CRadio()
@@ -547,8 +576,8 @@ void CRadio::Get1280AudioSamples(float gain)
     if (!DEBUG_BUF_GENERATED)
     {
         pTwoToneAudio = ippsMalloc_32f(256);
-        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.707 * cos(IPP_2PI * 3 * i / 256) + 0.707 * cos(IPP_2PI * 8 * i / 256);
-        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 1.0 * sin(IPP_2PI * 8 * i / 256) ;
+        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
+        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 1.0 * sin(IPP_2PI * 8 * i / 256) ;
         DEBUG_BUF_GENERATED = true;
     }
     int tempReadPointer = audioInRdPtr;
@@ -588,7 +617,8 @@ void ConjAndFilter(Ipp32fc* pData) // 2048 sample FFT result
 }
 
 int debug_xyz = 0;
-#define DBG_MAX_AMP 50
+#define DBG_MAX_AMP 210 // 70 seems to be 10% output
+#define DBG_MIN_AMP 40 // off below this setting
 void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 {
     static int lastPhase = 0;
@@ -631,6 +661,7 @@ void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 //        if (amp > 120) amp = 121; // debug safety
         if (amp > DBG_MAX_AMP) amp = DBG_MAX_AMP; // debug safety
         if (amp < 1) amp = 1;
+        amp += DBG_MIN_AMP; // this is "barely off"
         //amp = 31;//debug
 
         *(wd++) = 0x20 + (delta >> 6);
@@ -670,6 +701,87 @@ void CRadio::BuildGainRamp(float * ramp, float GainPA, float GainAB, float GainB
     }
 
 
+}
+
+// Zero DC, sub-bass, and all negative-frequency bins; double the voice passband
+// to form the one-sided analytic spectrum (Hilbert transform + bandpass in one step).
+static void ApplyAnalyticBandpass(Ipp32fc* pFFT)
+{
+    ippsZero_32fc(pFFT, CESSB_BIN_LOW);
+    for (int i = CESSB_BIN_LOW; i <= CESSB_BIN_HIGH; i++)
+        { pFFT[i].re *= 2.0f; pFFT[i].im *= 2.0f; }
+    ippsZero_32fc(pFFT + CESSB_BIN_HIGH + 1, CESSB_FFT_N - CESSB_BIN_HIGH - 1);
+}
+
+// Bandpass-only filter for an already-analytic (one-sided) complex signal.
+// Zeros everything outside the voice passband without doubling.
+static void ApplyComplexBandpass(Ipp32fc* pFFT)
+{
+    ippsZero_32fc(pFFT, CESSB_BIN_LOW);
+    ippsZero_32fc(pFFT + CESSB_BIN_HIGH + 1, CESSB_FFT_N - CESSB_BIN_HIGH - 1);
+}
+
+// Hard-limit the envelope of a complex array to 1.0, preserving phase.
+static void ClipEnvelope(Ipp32fc* pData, int n)
+{
+    for (int i = 0; i < n; i++) {
+        float r = pData[i].re, q = pData[i].im;
+        float mag2 = r * r + q * q;
+        if (mag2 > 1.0f) {
+            float inv = 1.0f / sqrtf(mag2);
+            pData[i].re = r * inv;
+            pData[i].im = q * inv;
+        }
+    }
+}
+
+// Zero all CESSB overlap history; call once before transmitting a new audio stream.
+void CRadio::InitCESSB()
+{
+    ippsZero_32f(cessbRealOverlap, CESSB_OVERLAP);
+    ippsZero_32fc(cessbCplxOverlap1, CESSB_OVERLAP);
+    ippsZero_32fc(cessbCplxOverlap2, CESSB_OVERLAP);
+}
+
+// Process 1280 real audio samples into 1280 complex analytic SSB samples (CESSB).
+// pIn  : 1280 real audio samples at 48 kHz (normalized, peak <= 1.0 recommended)
+// pOut : 1280 Ipp32fc analytic SSB baseband signal; Re(pOut) is the SSB audio
+void CRadio::ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut)
+{
+    // --- Stage 1: real audio -> bandpass-filtered analytic signal via Hilbert ---
+    // Build 2048-sample complex block from [768 real history | 1280 new samples]
+    for (int i = 0; i < CESSB_OVERLAP; i++)
+        cessbWorkBuf[i] = { cessbRealOverlap[i], 0.0f };
+    for (int i = 0; i < CESSB_BLOCK; i++)
+        cessbWorkBuf[CESSB_OVERLAP + i] = { pIn[i], 0.0f };
+    // Save last 768 input samples as history for the next call
+    ippsCopy_32f(pIn + CESSB_BLOCK - CESSB_OVERLAP, cessbRealOverlap, CESSB_OVERLAP);
+
+    ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ApplyAnalyticBandpass(cessbWorkBuf);
+    ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    // Discard the first 768 overlap samples; the last 1280 are the valid output
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+
+    // --- Iteration 1: clip envelope, re-apply bandpass to remove clipping artifacts ---
+    ClipEnvelope(pOut, CESSB_BLOCK);
+    ippsCopy_32fc(cessbCplxOverlap1, cessbWorkBuf, CESSB_OVERLAP);
+    ippsCopy_32fc(pOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
+    ippsCopy_32fc(pOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap1, CESSB_OVERLAP);
+    ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ApplyComplexBandpass(cessbWorkBuf);
+    ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+
+    // --- Iteration 2: second clip + bandpass for further PAPR reduction ---
+    ClipEnvelope(pOut, CESSB_BLOCK);
+    ippsCopy_32fc(cessbCplxOverlap2, cessbWorkBuf, CESSB_OVERLAP);
+    ippsCopy_32fc(pOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
+    ippsCopy_32fc(pOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap2, CESSB_OVERLAP);
+    ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ApplyComplexBandpass(cessbWorkBuf);
+    ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
 }
 
 DWORD GetBytesAvailable(HANDLE hComm) {

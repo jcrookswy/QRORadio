@@ -146,6 +146,8 @@ public:
     void B4Click(wxCommandEvent& event);
     void B5Click(wxCommandEvent& event);
     void B6Click(wxCommandEvent& event);
+    void B10Click(wxCommandEvent& event);
+    void OnCharHook(wxKeyEvent& event);
     void OnPaint(wxPaintEvent& event);
     void OnTimer(wxTimerEvent& event);
     void OnFileSave(wxCommandEvent& event);
@@ -159,6 +161,7 @@ public:
     void UpdateDebugText(char* text);
 
     CRadio* myRadio;
+    bool SPtoTX;
     wxDECLARE_EVENT_TABLE();
 
 };

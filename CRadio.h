@@ -124,12 +124,24 @@ public:
 	Ipp32f* RaisedCosUpDown;// = new Ipp32f[2048];
 	void BuildGainRamp(float* ramp, float GainPA, float GainAB, float GainBC);
 
+	void InitCESSB();
+	void ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut);
+
 	IppsFFTSpec_C_32fc* pFFTSpec;
 	Ipp8u* pFFTSpecBuf, * pFFTWorkBuf;
 
 	Ipp32fc* IFFTData;// = new Ipp32fc[16000];
 	Ipp32fc* IFFTAccum;// = new Ipp32fc[16000];
 	Ipp32f* RawAudio;
+
+	// CESSB state (overlap-save, 2048-pt FFT, 768-sample overlap)
+	Ipp32f*             cessbRealOverlap;   // 768 real samples: audio history for Hilbert stage
+	Ipp32fc*            cessbCplxOverlap1;  // 768 complex: history for iteration-1 post-clip filter
+	Ipp32fc*            cessbCplxOverlap2;  // 768 complex: history for iteration-2 post-clip filter
+	Ipp32fc*            cessbWorkBuf;       // 2048 complex: FFT working buffer
+	IppsFFTSpec_C_32fc* cessbFFTSpec;
+	Ipp8u*              cessbFFTSpecBuf;
+	Ipp8u*              cessbFFTWorkBuf;
 
 
 	int IQWriteAddr;

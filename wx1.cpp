@@ -610,6 +610,10 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button4->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B4Click), NULL, this);
     m_button5->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B5Click), NULL, this);
     m_button6->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B6Click), NULL, this);
+    m_button10->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B10Click), NULL, this);
+
+    SPtoTX = false;
+    Bind(wxEVT_CHAR_HOOK, &MyFrame::OnCharHook, this);
 //    m_button1->Enable();
 //    m_panel1->Connect(wxEVT_PAINT, wxPaintEventHandler(BasicDrawPane::paintEvent), NULL, this);
     m_timer.SetOwner(this, TIMER_ID);
@@ -755,5 +759,25 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     value.ToDouble(&freq);
     myRadio->LOfreq = freq;
     myRadio->NewLOFreq = true;
+}
+
+void MyFrame::B10Click(wxCommandEvent& event) // Toggle spacebar-to-TX
+{
+    SPtoTX = !SPtoTX;
+    m_button10->SetLabelText(SPtoTX ? _("[SP] to TX = Y") : _("[SP] to TX = N"));
+}
+
+void MyFrame::OnCharHook(wxKeyEvent& event)
+{
+    if (SPtoTX && event.GetKeyCode() == WXK_SPACE)
+    {
+        if (event.GetEventType() == wxEVT_KEY_DOWN)
+            myRadio->myStatus->mode = TX_MODE;
+        else if (event.GetEventType() == wxEVT_KEY_UP)
+            myRadio->myStatus->mode = RX_MODE;
+        // Consume the space so it doesn't activate whatever button has focus
+        return;
+    }
+    event.Skip();
 }
 
