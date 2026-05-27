@@ -291,11 +291,18 @@ CRadio::CRadio()
     for (int i = 0; i < 1024; i++)
         RaisedCosUpDown[i] = 0.5 - 0.5 * cos(IPP_2PI * i / 1024);
 
-    //Initialize polyphase resampler
+    //Initialize polyphase resamplers (I and Q channels, identical parameters)
     int polySize = 0;
     ippsResamplePolyphaseGetSize_32f(128, 32, &polySize, ippAlgHintAccurate);
-    resample_state = (IppsResamplingPolyphase_32f*)ippsMalloc_8u(polySize);
-    ippsResamplePolyphaseInit_32f(128, 32, 0.4, 4.0, resample_state, ippAlgHintAccurate);
+    resample_state   = (IppsResamplingPolyphase_32f*)ippsMalloc_8u(polySize);
+    resample_state_q = (IppsResamplingPolyphase_32f*)ippsMalloc_8u(polySize);
+    ippsResamplePolyphaseInit_32f(128, 32, 0.4, 4.0, resample_state,   ippAlgHintAccurate);
+    ippsResamplePolyphaseInit_32f(128, 32, 0.4, 4.0, resample_state_q, ippAlgHintAccurate);
+
+    cessbOut           = ippsMalloc_32fc(CESSB_BLOCK);
+    cessbI             = ippsMalloc_32f(CESSB_BLOCK);
+    cessbQ             = ippsMalloc_32f(CESSB_BLOCK);
+    resampledAudioOutQ = ippsMalloc_32f(8192);
 
 
 	IQWriteAddr = 0; // We want I/Q data in chunks of 250
@@ -576,8 +583,8 @@ void CRadio::Get1280AudioSamples(float gain)
     if (!DEBUG_BUF_GENERATED)
     {
         pTwoToneAudio = ippsMalloc_32f(256);
-        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
-        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 1.0 * sin(IPP_2PI * 8 * i / 256) ;
+        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
+        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 1.0 * sin(IPP_2PI * 8 * i / 256) ;
         DEBUG_BUF_GENERATED = true;
     }
     int tempReadPointer = audioInRdPtr;
@@ -616,6 +623,21 @@ void ConjAndFilter(Ipp32fc* pData) // 2048 sample FFT result
  
 }
 
+// Bandpass for an already-analytic (CESSB) complex signal — same bin structure as
+// ConjAndFilter but without the x2 (signal is already one-sided; edge tapers halved).
+static void BandpassOneSided(Ipp32fc* pData)
+{
+    for (int i = 0; i < 8; i++) pData[i] = { 0.0f, 0.0f };
+    pData[8].re  *= 0.1464f; pData[8].im  *= 0.1464f;
+    // bin 9: pass through (mirrors ConjAndFilter's untouched bin)
+    pData[10].re *= 0.8536f; pData[10].im *= 0.8536f;
+    // bins 11-110: pass through (x1.0 — ConjAndFilter doubled these)
+    pData[111].re *= 0.8536f; pData[111].im *= 0.8536f;
+    // bin 112: pass through
+    pData[113].re *= 0.1464f; pData[113].im *= 0.1464f;
+    for (int i = 114; i < 2048; i++) pData[i] = { 0.0f, 0.0f };
+}
+
 int debug_xyz = 0;
 #define DBG_MAX_AMP 210 // 70 seems to be 10% output
 #define DBG_MIN_AMP 40 // off below this setting
@@ -645,7 +667,7 @@ void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 
        // if (ampl[i] > 1.0)
         //amp = floor(ampl[i] * 312.0 + 0.5);
-       // amp = floor(ampl[i] * 200.0 + 0.5);
+       // amp = floor(ampl[i] * 200.0 + 0.5); 
         if (ampl[i] > 1.00)
         {
             amp = DBG_MAX_AMP;//Clip
@@ -867,27 +889,37 @@ void CRadio::TXDataLoop()
 
         if (audioSamplecount >= 1280)
         {
-            Get1280AudioSamples(audioGain); // Apply gain here, compress later 
+            Get1280AudioSamples(audioGain);
             audioInRdPtr += 1024;
             if (audioInRdPtr >= 16384) audioInRdPtr -= 16384;
-            int newSampleCount = 0;
-            ippsResamplePolyphase_32f(resampledAudioIn, 1024, &resampledAudioOut[ResampleOutCount],
+
+            // CESSB: real audio -> complex analytic SSB, then resample I and Q separately
+            ProcessCESSB(resampledAudioIn, cessbOut);
+            for (int i = 0; i < CESSB_BLOCK; i++)
+                { cessbI[i] = cessbOut[i].re; cessbQ[i] = cessbOut[i].im; }
+
+            int newSampleCount = 0, newSampleCountQ = 0;
+            Ipp64f timeQ = time;
+            ippsResamplePolyphase_32f(cessbI, 1024, &resampledAudioOut[ResampleOutCount],
                 factor, 1.0, &time, &newSampleCount, resample_state);
+            ippsResamplePolyphase_32f(cessbQ, 1024, &resampledAudioOutQ[ResampleOutCount],
+                factor, 1.0, &timeQ, &newSampleCountQ, resample_state_q);
             ResampleOutCount += newSampleCount;
             time -= 1024;
-            // window-overlap-FFT
+
+            // window-overlap-FFT on complex resampled CESSB signal
             int sendSampleCount = 0;
             while ((sendSampleCount + 2047) < ResampleOutCount)
             {
-                Ipp32f* pra = &resampledAudioOut[sendSampleCount];
-                //ippsZero_32fc(TXFFTData, 256); //zero out imaginary
-                for (int s = 0; s < 2048; s++) TXFFTData[s] = { *(pra++), 0.0 };
+                Ipp32f* pI = &resampledAudioOut[sendSampleCount];
+                Ipp32f* pQ = &resampledAudioOutQ[sendSampleCount];
+                for (int s = 0; s < 2048; s++) TXFFTData[s] = { pI[s], pQ[s] };
                 //window
                 ippsMul_32f32fc_I(TXHannWindow, TXFFTData, 2048);
                 //FFT
                 ippsFFTFwd_CToC_32fc_I(TXFFTData, pTFFTSpec, pTFFTWorkBuf);
-                //Conjugate and filter
-                ConjAndFilter(TXFFTData);
+                //Bandpass only — signal is already one-sided analytic from CESSB
+                BandpassOneSided(TXFFTData);
                 //Back to time domain
                 ippsFFTInv_CToC_32fc_I(TXFFTData, pTFFTSpec, pTFFTWorkBuf);
 
@@ -953,7 +985,8 @@ void CRadio::TXDataLoop()
             } //((sendSampleCount + 255) < ResampleOutCount)
 
             //Shift remaining resampled audio samples to front of buffer
-            ippsCopy_32f(&resampledAudioOut[sendSampleCount], resampledAudioOut, ResampleOutCount - sendSampleCount);
+            ippsCopy_32f(&resampledAudioOut[sendSampleCount],  resampledAudioOut,  ResampleOutCount - sendSampleCount);
+            ippsCopy_32f(&resampledAudioOutQ[sendSampleCount], resampledAudioOutQ, ResampleOutCount - sendSampleCount);
             ResampleOutCount -= sendSampleCount;
 
             myStatus->UpdateText = true;

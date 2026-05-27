@@ -92,10 +92,16 @@ public:
 
 	Ipp32f* audioInBuf;
 	Ipp32f* audioOutBuf;
-	Ipp32f* resampledAudioOut;
+	Ipp32f* resampledAudioOut;   // I channel resampled (also used for real-only path)
+	Ipp32f* resampledAudioOutQ; // Q channel resampled (CESSB complex path)
 	Ipp32f* resampledAudioIn;
 	void Get1280AudioSamples(float gain);
-	IppsResamplingPolyphase_32f* resample_state;
+	IppsResamplingPolyphase_32f* resample_state;    // I channel polyphase resampler
+	IppsResamplingPolyphase_32f* resample_state_q;  // Q channel polyphase resampler
+
+	Ipp32fc* cessbOut;  // CESSB complex output, 1280 samples
+	Ipp32f*  cessbI;    // I channel split for resampler, 1280 samples
+	Ipp32f*  cessbQ;    // Q channel split for resampler, 1280 samples
 
 	float LOfreq;
 	bool NewLOFreq;
