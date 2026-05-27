@@ -818,19 +818,11 @@ DWORD GetBytesAvailable(HANDLE hComm) {
 
 void CRadio::TXDataLoop()
 {
-    DWORD WriteData4[16];
     char writeData[64];
     char readData[64];
     DWORD bytesWritten = 0;
-    DWORD bytesToWrite = 4;
-    int ADCReadInterval = 16;
-
     float audioGain = 10.0;
-
-    Ipp32fc OverlapSum[1024];
-    Ipp32f  OverlapSumMag[1024];
-    Ipp32f  AudioMag[128];
-    Ipp32f DebugStuff[1024];
+    int txPacketCount = 0;
 
     Ipp32fc * TXIFFTAccum = ippsMalloc_32fc(3072);
 
@@ -861,8 +853,6 @@ void CRadio::TXDataLoop()
     audioInRdPtr = audioInWrPtr; // Purge old audio
     audioInRdPtr = audioInRdPtr & 0xFF00; // round down
     if (audioInRdPtr >= 16384) audioInRdPtr = 0;
-    float myPeakAudio = 0.1;
-
     ippsZero_32fc(TXIFFTAccum, 3072); //Re-use IFFT accumulator. This will also be used to raised-cosine taper rising / falling edge of audio
  
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
@@ -870,16 +860,6 @@ void CRadio::TXDataLoop()
     writeData[0] = 'T'; // Transmit mode
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     Sleep(32);//Wait for command / relays
-
-    Ipp32f GainPA = 1.0;
-    Ipp32f GainAB = 1.0;
-    Ipp32f GainBC = 1.0;
-    Ipp32f GainAGC = 1.0;
-    Ipp32f ScaleA = 1.0;
-    Ipp32f ScaleB = 1.0;
-
- //   FILE* f;
- //   fopen_s(&f, "compress.txt", "w");
 
     while (TX_MODE == myStatus->mode) // Continue until mode changes
     {
@@ -934,52 +914,19 @@ void CRadio::TXDataLoop()
                 //memcpy(DebugStuff, TXIFFTAccum, 3072 * 8);
                 //nope
 
-                //Let's find and scale to the peak.
-                //The most recent audio peak will be GainBC. The old audio peak will be in GainAB.
-                //When BC > AB, transition AB down in 2nd half. When AB > BC, transition BC up in 1st half
-                ippsAdd_32fc(&TXIFFTAccum[2048], TXFFTData, OverlapSum, 1024);  // recent B + old C
-                ippsMagnitude_32fc(OverlapSum, OverlapSumMag, 1024);
-                ippsMax_32f(OverlapSumMag, 1024, &GainBC);                   //Gain to compute scale(B)
-                //Let's try forcing a fast attack no decay snap down AGC
-                if (GainBC < 1.0)
-                {
-                    GainBC = 1.0;                             //Only compress, don't expand
-                    GainAGC = 1.0;
-                }
-                else
-                {
-                    if (GainAGC < GainBC) GainAGC = GainBC;//Instant attack
-                    GainBC = GainAGC;
-                }
+                ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);  // A + B => output
+                if (txPacketCount == 0)
+                    ippsMul_32f32fc_I(TXHannWindow, TXIFFTAccum, 1024); // rising taper on first packet
 
- 
-                //We can reuse OverlapSumMag for RaisedCosUpDown
-                ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);      //A + B => output, now AGC
-                BuildGainRamp(OverlapSumMag, GainPA, GainAB, GainBC);
-                ippsMul_32f32fc_I(OverlapSumMag, TXIFFTAccum, 1024);
-
- //               fprintf_s(f, "%.3f, %.3f, %.3f\n", GainPA, GainAB, GainBC);
-
-                //ScaleB = (GainBC > GainAB) ? 1.0f / GainBC : 1.0f / GainAB; //Scale to inverse of larger
-                //ScaleB = 1.0;//debug
-
-               /// ippsMulC_32f_I(ScaleB, (Ipp32f *)&TXIFFTAccum[1024], 4096);     //B is now scaled [128] - [383]
-                                                                            //A was scaled last time
-                //ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);            //Scaled A + scaled B => output
-                //memcpy(DebugStuff, IFFTAccum, 256 * 8);
-                //Send 128 samples
                 for (int s = 0; s < 1024; s+=8)
                 {
                     BuildTXPacket(writeData, &TXIFFTAccum[s]);
-                    WriteFile(hSerial, writeData, 33, &bytesWritten, NULL); 
+                    WriteFile(hSerial, writeData, 33, &bytesWritten, NULL);
                 }
-                //Update buffers / variables for next time
-                ippsCopy_32fc(&TXIFFTAccum[2048], TXIFFTAccum, 1024);//late scaled B becomes Late A
-                ippsCopy_32fc(TXFFTData, &TXIFFTAccum[1024], 2048);//unscaled C becomes unscaled B
-                GainPA = GainAB;
-                GainAB = GainBC;
+                ippsCopy_32fc(&TXIFFTAccum[2048], TXIFFTAccum, 1024);
+                ippsCopy_32fc(TXFFTData, &TXIFFTAccum[1024], 2048);
+                txPacketCount++;
 
-                //Increment sendSampleCount by 128
                 sendSampleCount += 1024;
 
             } //((sendSampleCount + 255) < ResampleOutCount)
@@ -1019,12 +966,13 @@ void CRadio::TXDataLoop()
     } // while (TX_MODE == myStatus->mode)
  //   fclose(f);
 
-    //Decay amplitude over 128 final samples
-    //Conveniently, 1st 1/2 of IFFTAccum already has a raised-cosine-taper of what we need to send.
+    // Final packet: overlap-add remaining tail, apply falling taper, send
+    ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);
+    ippsMul_32f32fc_I(&TXHannWindow[1024], TXIFFTAccum, 1024);
     for (int s = 0; s < 1024; s += 8)
     {
-        BuildTXPacket(writeData, &IFFTAccum[s]);
-        WriteFile(hSerial, writeData, 33, &bytesWritten, NULL); 
+        BuildTXPacket(writeData, &TXIFFTAccum[s]);
+        WriteFile(hSerial, writeData, 33, &bytesWritten, NULL);
     }
 
     //Dump residual ADC data if any
