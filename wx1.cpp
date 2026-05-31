@@ -761,22 +761,19 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     myRadio->NewLOFreq = true;
 }
 
-void MyFrame::B10Click(wxCommandEvent& event) // Toggle spacebar-to-TX
+void MyFrame::B10Click(wxCommandEvent& event)
 {
     SPtoTX = !SPtoTX;
-    m_button10->SetLabelText(SPtoTX ? _("[SP] to TX = Y") : _("[SP] to TX = N"));
+    m_button10->SetLabelText(SPtoTX ? _("T/R Keys Enabled") : _("T/R Keys Disabled"));
 }
 
 void MyFrame::OnCharHook(wxKeyEvent& event)
 {
-    if (SPtoTX && event.GetKeyCode() == WXK_SPACE)
+    if (SPtoTX)
     {
-        if (event.GetEventType() == wxEVT_KEY_DOWN)
-            myRadio->myStatus->mode = TX_MODE;
-        else if (event.GetEventType() == wxEVT_KEY_UP)
-            myRadio->myStatus->mode = RX_MODE;
-        // Consume the space so it doesn't activate whatever button has focus
-        return;
+        int key = event.GetKeyCode();
+        if (key == 'T') { myRadio->myStatus->mode = TX_MODE; return; }
+        if (key == 'R') { myRadio->myStatus->mode = RX_MODE; return; }
     }
     event.Skip();
 }

@@ -24,6 +24,7 @@ struct AntTuneCal {
 	Ipp32fc SweptOpen[36];
 	Ipp32fc SweptShort[36];
 	Ipp32fc SweptLoad[36];
+	Ipp32fc SweptIQMu[36];
 };
 
 struct RadioStatus {
@@ -104,6 +105,7 @@ public:
 	Ipp32f*  cessbQ;    // Q channel split for resampler, 1280 samples
 
 	float LOfreq;
+	float micGain;
 	bool NewLOFreq;
 
 	Ipp32f* MagData ;
@@ -140,15 +142,25 @@ public:
 	Ipp32fc* IFFTAccum;// = new Ipp32fc[16000];
 	Ipp32f* RawAudio;
 
+	// TX audio bandpass filter state (300 Hz HPF + 3 kHz LPF, reset each PTT)
+	float txHPF_x1, txHPF_x2, txHPF_y1, txHPF_y2;
+	float txLPF_x1, txLPF_x2, txLPF_y1, txLPF_y2;
+
+	Ipp32f debugTonePhase;  // persistent phase for debug tone 1
+	Ipp32f debugTonePhase2; // persistent phase for debug tone 2
+
 	// CESSB state (overlap-save, 2048-pt FFT, 768-sample overlap)
 	Ipp32f*             cessbRealOverlap;   // 768 real samples: audio history for Hilbert stage
 	Ipp32fc*            cessbCplxOverlap1;  // 768 complex: history for iteration-1 post-clip filter
 	Ipp32fc*            cessbCplxOverlap2;  // 768 complex: history for iteration-2 post-clip filter
+	Ipp32fc*            cessbCplxOverlap3;  // 768 complex: history for iteration-3 post-clip filter
 	Ipp32fc*            cessbWorkBuf;       // 2048 complex: FFT working buffer
 	IppsFFTSpec_C_32fc* cessbFFTSpec;
 	Ipp8u*              cessbFFTSpecBuf;
 	Ipp8u*              cessbFFTWorkBuf;
 
+
+	Ipp32fc m_lastIQMu;
 
 	int IQWriteAddr;
 	int IQReadAddr;

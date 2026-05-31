@@ -7,6 +7,11 @@
 #include <iostream>
 //#include "frame1.h"
 
+#define ENABLE_CESSB    // Comment out to bypass CESSB (unprocessed SSB, no envelope clipping)
+
+bool gUseDebugWaveform = false;
+
+
 //void ProcessPlotThread(int id, void* p) {
 //    CRadio* pRadio = (CRadio*)p;
 //    pRadio->PlotThread();
@@ -151,14 +156,14 @@ bool CRadio::SaveSettings(const char* path)
     fprintf(f, "  \"LOfreq\": %f,\n", LOfreq);
     fprintf(f, "  \"RelaySettings\": %d,\n", RelaySettings);
 
-    const char*  names[]  = { "SweptOpen", "SweptShort", "SweptLoad" };
-    Ipp32fc*     arrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad };
-    for (int a = 0; a < 3; a++)
+    const char*  names[]  = { "SweptOpen", "SweptShort", "SweptLoad", "SweptIQMu" };
+    Ipp32fc*     arrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad, myVNACal->SweptIQMu };
+    for (int a = 0; a < 4; a++)
     {
         fprintf(f, "  \"%s\": [\n", names[a]);
         for (int i = 0; i < 36; i++)
             fprintf(f, "    [%f, %f]%s\n", arrays[a][i].re, arrays[a][i].im, i < 35 ? "," : "");
-        fprintf(f, "  ]%s\n", a < 2 ? "," : "");
+        fprintf(f, "  ]%s\n", a < 3 ? "," : "");
     }
 
     fprintf(f, "}\n");
@@ -172,8 +177,8 @@ bool CRadio::LoadSettings(const char* path)
     fopen_s(&f, path, "r");
     if (!f) return false;
 
-    Ipp32fc* calArrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad };
-    int calSection = -1; // 0=Open 1=Short 2=Load
+    Ipp32fc* calArrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad, myVNACal->SweptIQMu };
+    int calSection = -1; // 0=Open 1=Short 2=Load 3=IQMu
     int calIdx = 0;
 
     char line[256];
@@ -183,9 +188,10 @@ bool CRadio::LoadSettings(const char* path)
         if      (sscanf_s(line, " \"comPort\": %d",       &ival) == 1) comPort       = ival;
         else if (sscanf_s(line, " \"LOfreq\": %f",        &fval) == 1) LOfreq        = fval;
         else if (sscanf_s(line, " \"RelaySettings\": %d", &ival) == 1) RelaySettings = ival;
-        else if (strstr(line, "\"SweptOpen\""))  { calSection = 0; calIdx = 0; }
-        else if (strstr(line, "\"SweptShort\"")) { calSection = 1; calIdx = 0; }
-        else if (strstr(line, "\"SweptLoad\""))  { calSection = 2; calIdx = 0; }
+        else if (strstr(line, "\"SweptOpen\""))        { calSection = 0; calIdx = 0; }
+        else if (strstr(line, "\"SweptShort\""))       { calSection = 1; calIdx = 0; }
+        else if (strstr(line, "\"SweptLoad\""))        { calSection = 2; calIdx = 0; }
+        else if (strstr(line, "\"SweptIQMu\""))        { calSection = 3; calIdx = 0; }
         else if (calSection >= 0 && calIdx < 36 && sscanf_s(line, " [%f , %f]", &re, &im) == 2)
         {
             calArrays[calSection][calIdx].re = re;
@@ -200,6 +206,7 @@ bool CRadio::LoadSettings(const char* path)
 CRadio::CRadio()
 {
     ippInit();                      // Initialize Intel� IPP library 
+    micGain = 2.5;
 
     audioInBuf = new Ipp32f[16384];
     audioOutBuf = new Ipp32f[16384];
@@ -314,13 +321,16 @@ CRadio::CRadio()
         myVNACal->SweptOpen[k] = { 1.0, 0.0 };
         myVNACal->SweptShort[k] = { -1.0, 0.0 };
         myVNACal->SweptLoad[k] = { -1.0, 0.0 };
+        myVNACal->SweptIQMu[k] = { 0.0, 0.0 };
     }
+    m_lastIQMu = { 0.0, 0.0 };
     InitStatus(myStatus);
 
     // CESSB overlap-save buffers
     cessbRealOverlap  = ippsMalloc_32f(CESSB_OVERLAP);
     cessbCplxOverlap1 = ippsMalloc_32fc(CESSB_OVERLAP);
     cessbCplxOverlap2 = ippsMalloc_32fc(CESSB_OVERLAP);
+    cessbCplxOverlap3 = ippsMalloc_32fc(CESSB_OVERLAP);
     cessbWorkBuf      = ippsMalloc_32fc(CESSB_FFT_N);
 
     // 2048-pt FFT for CESSB (order 11, forward divides by N)
@@ -454,15 +464,14 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
         FabsRawAudio = fabsf(RawAudio[i]);
         if (MaxAudio < FabsRawAudio) MaxAudio = FabsRawAudio;
     }
-    Ipp32f RecipMax = 1.0 / MaxAudio;
-    if ((MaxAudio > 1.0) || bypassALC) {
+    if ((MaxAudio > 1.0f) || (bypassALC && MaxAudio > 0.001f)) {
         TunerMag /= MaxAudio;
-        Ipp32f recip = 1.0 / MaxAudio;
+        Ipp32f recip = 1.0f / MaxAudio;
         for (int i = 0; i < 256; i++) RawAudio[i] *= recip;
     }
-    else if (MaxAudio < 0.001) TunerMag *= 2.0;
-    else if (MaxAudio < 0.1) TunerMag *= 1.01;
-    else if (MaxAudio > 0.2) TunerMag *= 0.99;
+    else if (MaxAudio < 0.5f) TunerMag *= 1.02f;
+    else if (MaxAudio > 0.8f) TunerMag *= 0.99f;
+    if (TunerMag > 100.0f) TunerMag = 100.0f;
 
     //Copy audio to output buf
 //    float * audioOutBufPtr = &audioOutBuf[audioOutWrPtr];
@@ -576,28 +585,48 @@ void fabsxoveroneplusx(float* inPlaceData)
     for (int i = 0; i < 256; i++) inPlaceData[i] = inPlaceData[i] / (1.0 + fabs(inPlaceData[i]));
 }
 
-bool DEBUG_BUF_GENERATED = false;
-Ipp32f* pTwoToneAudio;
+//bool DEBUG_BUF_GENERATED = false;
+//Ipp32f* pTwoToneAudio;
 void CRadio::Get1280AudioSamples(float gain)
 {
-    if (!DEBUG_BUF_GENERATED)
-    {
-        pTwoToneAudio = ippsMalloc_32f(256);
-        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
-        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 1.0 * sin(IPP_2PI * 8 * i / 256) ;
-        DEBUG_BUF_GENERATED = true;
-    }
-    int tempReadPointer = audioInRdPtr;
-    for (int i = 0; i < 1280; i+=256)
-    {
-        ippsCopy_32f(pTwoToneAudio, &resampledAudioIn[i], 256);//debug
-        //ippsCopy_32f(&audioInBuf[tempReadPointer], &resampledAudioIn[i], 256);
-        //dbg ippsMulC_32f(&audioInBuf[tempReadPointer], gain, &resampledAudioIn[i], 256); // Apply gain pre compression
-        //fabsxoveroneplusx(&resampledAudioIn[i]);
-        tempReadPointer = (tempReadPointer + 256) & 16383; // wrap
+    //if (!DEBUG_BUF_GENERATED)
+    //{
+    //    pTwoToneAudio = ippsMalloc_32f(256);
+    //    for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
+    //    //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 5 * i / 256) + 0.4999 * cos(IPP_2PI * 6 * i / 256);
+    //    //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.9999 * sin(IPP_2PI * 8 * i / 256) ;
+    //    DEBUG_BUF_GENERATED = true;
+    //}
 
+    if (gUseDebugWaveform)
+    {
+        // Two-tone debug signal: 0.017 + 0.027, each at 0.5 amplitude.
+        // Each tone is split into 1024 + 256 calls so the persistent phases
+        // advance by 1024 samples (matching the audioInRdPtr stride), not 1280.
+        Ipp32f toneBuf[1280];
+
+        // Tone 1 (0.017) into resampledAudioIn
+        ippsTone_32f(resampledAudioIn,       1024, 0.5f, 0.017f, &debugTonePhase,  ippAlgHintFast);
+        Ipp32f tmp1 = debugTonePhase;
+        ippsTone_32f(resampledAudioIn + 1024, 256, 0.5f, 0.017f, &tmp1,            ippAlgHintFast);
+
+        // Tone 2 (0.027) into temp buffer, then add to resampledAudioIn
+        ippsTone_32f(toneBuf,       1024, 0.5f, 0.027f, &debugTonePhase2, ippAlgHintFast);
+        Ipp32f tmp2 = debugTonePhase2;
+        ippsTone_32f(toneBuf + 1024, 256, 0.5f, 0.027f, &tmp2,           ippAlgHintFast);
+
+        ippsAdd_32f_I(toneBuf, resampledAudioIn, 1280);
     }
-    
+    else
+    {
+        int tempReadPointer = audioInRdPtr;
+        for (int i = 0; i < 1280; i += 256)
+        {
+            //ippsCopy_32f(&audioInBuf[tempReadPointer], &resampledAudioIn[i], 256);
+            ippsMulC_32f(&audioInBuf[tempReadPointer], gain, &resampledAudioIn[i], 256); // Apply gain pre compression
+            tempReadPointer = (tempReadPointer + 256) & 16383; // wrap
+        }
+    }
 }
 void ConjAndFilter(Ipp32fc* pData) // 2048 sample FFT result
 {
@@ -639,8 +668,15 @@ static void BandpassOneSided(Ipp32fc* pData)
 }
 
 int debug_xyz = 0;
-#define DBG_MAX_AMP 210 // 70 seems to be 10% output
+int g_min_amp = 32;
+int g_max_amp = 180;
+int g_abs_max_amp = 207;
+
+#define DBG_MAX_AMP 250 // 70 seems to be 10% output 250 = 166W. 280 = 207W
+//#define DBG_MAX_AMP 210 // 70 seems to be 10% output
 #define DBG_MIN_AMP 40 // off below this setting
+//#define DBG_MAX_AMP 30 // 30 is barely on
+//#define DBG_MIN_AMP 25 // 28 is barely off
 void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 {
     static int lastPhase = 0;
@@ -668,22 +704,13 @@ void BuildTXPacket(char* wd, Ipp32fc* pIQ)
        // if (ampl[i] > 1.0)
         //amp = floor(ampl[i] * 312.0 + 0.5);
        // amp = floor(ampl[i] * 200.0 + 0.5); 
-        if (ampl[i] > 1.00)
-        {
-            amp = DBG_MAX_AMP;//Clip
-            remainder = 0.5;
-        }
-        else
-        {
-            amp = floor(ampl[i] * DBG_MAX_AMP + remainder + 0.5);
-            //amp = floor(ampl[i] * 101 + 0.5);
-            remainder += ampl[i] * DBG_MAX_AMP - amp; // Carry remainder to approximate extra bits
-        }
 
-//        if (amp > 120) amp = 121; // debug safety
-        if (amp > DBG_MAX_AMP) amp = DBG_MAX_AMP; // debug safety
-        if (amp < 1) amp = 1;
-        amp += DBG_MIN_AMP; // this is "barely off"
+       amp = floor(ampl[i] * g_max_amp + remainder + 0.5);
+       remainder += ampl[i] * g_max_amp - amp; // Carry remainder to approximate extra bits
+
+        if (amp > g_abs_max_amp) amp = g_abs_max_amp; // max is 1.0, abs max is just below modulator clipping
+        if (amp < 0) amp = 0;
+        amp += g_min_amp; // this is "barely off"
         //amp = 31;//debug
 
         *(wd++) = 0x20 + (delta >> 6);
@@ -727,20 +754,35 @@ void CRadio::BuildGainRamp(float * ramp, float GainPA, float GainAB, float GainB
 
 // Zero DC, sub-bass, and all negative-frequency bins; double the voice passband
 // to form the one-sided analytic spectrum (Hilbert transform + bandpass in one step).
+// Raised-cosine taper weights for 4-step ramp (k=1,2,3 of N=4): 0.1464, 0.5, 0.8536
+// Applied to 3 bins just outside the pass edges; ×2 here because this is the Hilbert stage.
 static void ApplyAnalyticBandpass(Ipp32fc* pFFT)
 {
-    ippsZero_32fc(pFFT, CESSB_BIN_LOW);
+    ippsZero_32fc(pFFT, CESSB_BIN_LOW - 3);          // bins 0-9: zero
+    pFFT[CESSB_BIN_LOW-3].re *= 0.2929f; pFFT[CESSB_BIN_LOW-3].im *= 0.2929f; // bin 10
+    pFFT[CESSB_BIN_LOW-2].re *= 1.0000f; pFFT[CESSB_BIN_LOW-2].im *= 1.0000f; // bin 11
+    pFFT[CESSB_BIN_LOW-1].re *= 1.7071f; pFFT[CESSB_BIN_LOW-1].im *= 1.7071f; // bin 12
     for (int i = CESSB_BIN_LOW; i <= CESSB_BIN_HIGH; i++)
         { pFFT[i].re *= 2.0f; pFFT[i].im *= 2.0f; }
-    ippsZero_32fc(pFFT + CESSB_BIN_HIGH + 1, CESSB_FFT_N - CESSB_BIN_HIGH - 1);
+    pFFT[CESSB_BIN_HIGH+1].re *= 1.7071f; pFFT[CESSB_BIN_HIGH+1].im *= 1.7071f; // bin 116
+    pFFT[CESSB_BIN_HIGH+2].re *= 1.0000f; pFFT[CESSB_BIN_HIGH+2].im *= 1.0000f; // bin 117
+    pFFT[CESSB_BIN_HIGH+3].re *= 0.2929f; pFFT[CESSB_BIN_HIGH+3].im *= 0.2929f; // bin 118
+    ippsZero_32fc(pFFT + CESSB_BIN_HIGH + 4, CESSB_FFT_N - CESSB_BIN_HIGH - 4); // bins 119+
 }
 
 // Bandpass-only filter for an already-analytic (one-sided) complex signal.
 // Zeros everything outside the voice passband without doubling.
 static void ApplyComplexBandpass(Ipp32fc* pFFT)
 {
-    ippsZero_32fc(pFFT, CESSB_BIN_LOW);
-    ippsZero_32fc(pFFT + CESSB_BIN_HIGH + 1, CESSB_FFT_N - CESSB_BIN_HIGH - 1);
+    ippsZero_32fc(pFFT, CESSB_BIN_LOW - 3);          // bins 0-9: zero
+    pFFT[CESSB_BIN_LOW-3].re *= 0.1464f; pFFT[CESSB_BIN_LOW-3].im *= 0.1464f; // bin 10
+    pFFT[CESSB_BIN_LOW-2].re *= 0.5000f; pFFT[CESSB_BIN_LOW-2].im *= 0.5000f; // bin 11
+    pFFT[CESSB_BIN_LOW-1].re *= 0.8536f; pFFT[CESSB_BIN_LOW-1].im *= 0.8536f; // bin 12
+    // bins 13-115: pass through
+    pFFT[CESSB_BIN_HIGH+1].re *= 0.8536f; pFFT[CESSB_BIN_HIGH+1].im *= 0.8536f; // bin 116
+    pFFT[CESSB_BIN_HIGH+2].re *= 0.5000f; pFFT[CESSB_BIN_HIGH+2].im *= 0.5000f; // bin 117
+    pFFT[CESSB_BIN_HIGH+3].re *= 0.1464f; pFFT[CESSB_BIN_HIGH+3].im *= 0.1464f; // bin 118
+    ippsZero_32fc(pFFT + CESSB_BIN_HIGH + 4, CESSB_FFT_N - CESSB_BIN_HIGH - 4); // bins 119+
 }
 
 // Hard-limit the envelope of a complex array to 1.0, preserving phase.
@@ -763,6 +805,11 @@ void CRadio::InitCESSB()
     ippsZero_32f(cessbRealOverlap, CESSB_OVERLAP);
     ippsZero_32fc(cessbCplxOverlap1, CESSB_OVERLAP);
     ippsZero_32fc(cessbCplxOverlap2, CESSB_OVERLAP);
+    ippsZero_32fc(cessbCplxOverlap3, CESSB_OVERLAP);
+    txHPF_x1 = txHPF_x2 = txHPF_y1 = txHPF_y2 = 0.0f;
+    txLPF_x1 = txLPF_x2 = txLPF_y1 = txLPF_y2 = 0.0f;
+    debugTonePhase  = 0.0f;
+    debugTonePhase2 = 0.0f;
 }
 
 // Process 1280 real audio samples into 1280 complex analytic SSB samples (CESSB).
@@ -804,6 +851,16 @@ void CRadio::ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut)
     ApplyComplexBandpass(cessbWorkBuf);
     ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
     ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+
+    // --- Iteration 3: third clip + bandpass to catch residual overshoot ---
+    ClipEnvelope(pOut, CESSB_BLOCK);
+    ippsCopy_32fc(cessbCplxOverlap3, cessbWorkBuf, CESSB_OVERLAP);
+    ippsCopy_32fc(pOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
+    ippsCopy_32fc(pOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap3, CESSB_OVERLAP);
+    ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ApplyComplexBandpass(cessbWorkBuf);
+    ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
 }
 
 DWORD GetBytesAvailable(HANDLE hComm) {
@@ -820,11 +877,17 @@ void CRadio::TXDataLoop()
 {
     char writeData[64];
     char readData[64];
+    char txBulkBuf[16 * 33]; // 16 packets × 33 bytes, sent in one WriteFile call
     DWORD bytesWritten = 0;
-    float audioGain = 10.0;
+    float agcGain      = 1.0f;
+    const float agcMaxGain  = 10.0f;   // +20 dB max boost
+    const float agcMinGain  = 1.0f;    // 
+    const float agcTarget   = 4.0f;     // target peak level into CESSB (overdrive the clipper)
+    const float agcAttack   = 0.41f;    // per-block attack  (~50 ms at 1280/48k blocks)
+    const float agcRelease  = 0.065f;   // per-block release (~400 ms)
     int txPacketCount = 0;
 
-    Ipp32fc * TXIFFTAccum = ippsMalloc_32fc(3072);
+    Ipp32fc * TXIFFTAccum = ippsMalloc_32fc(3072); 
 
     // Query to get buffer sizes
     int sizeTFFTSpec, sizeTFFTInitBuf, sizeTFFTWorkBuf;
@@ -850,16 +913,18 @@ void CRadio::TXDataLoop()
     Ipp64f factor = LOfreq * 1000.0 / (48.0 * 256); // Resample to the LO frequency / 256
     int ResampleOutCount = 0;
 
-    audioInRdPtr = audioInWrPtr; // Purge old audio
-    audioInRdPtr = audioInRdPtr & 0xFF00; // round down
-    if (audioInRdPtr >= 16384) audioInRdPtr = 0;
     ippsZero_32fc(TXIFFTAccum, 3072); //Re-use IFFT accumulator. This will also be used to raised-cosine taper rising / falling edge of audio
  
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+    InitCESSB(); // Clear overlap history so each transmission starts clean
 
     writeData[0] = 'T'; // Transmit mode
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     Sleep(32);//Wait for command / relays
+
+    audioInRdPtr = audioInWrPtr; // Purge old audio
+    audioInRdPtr = audioInRdPtr & 0xFF00; // round down
+    if (audioInRdPtr >= 16384) audioInRdPtr = 0;
 
     while (TX_MODE == myStatus->mode) // Continue until mode changes
     {
@@ -869,14 +934,48 @@ void CRadio::TXDataLoop()
 
         if (audioSamplecount >= 1280)
         {
-            Get1280AudioSamples(audioGain);
+            Get1280AudioSamples(agcGain);
             audioInRdPtr += 1024;
             if (audioInRdPtr >= 16384) audioInRdPtr -= 16384;
 
+            // Bandpass filter: 2nd-order Butterworth HPF (300 Hz) cascaded with LPF (3 kHz).
+            // Applied in-place so both AGC and CESSB see only in-band audio.
+            // Coefficients computed via bilinear transform at 48 kHz.
+            static const float hb0= 0.97256f, hb1=-1.94512f, hb2= 0.97256f; // HPF 300 Hz
+            static const float ha1=-1.94436f, ha2= 0.94583f;
+            static const float lb0= 0.02996f, lb1= 0.05991f, lb2= 0.02996f; // LPF 3 kHz
+            static const float la1=-1.45427f, la2= 0.57413f;
+            for (int i = 0; i < CESSB_BLOCK; i++) {
+                float xh = resampledAudioIn[i];
+                float yh = hb0*xh + hb1*txHPF_x1 + hb2*txHPF_x2 - ha1*txHPF_y1 - ha2*txHPF_y2;
+                txHPF_x2 = txHPF_x1; txHPF_x1 = xh;
+                txHPF_y2 = txHPF_y1; txHPF_y1 = yh;
+                float yl = lb0*yh + lb1*txLPF_x1 + lb2*txLPF_x2 - la1*txLPF_y1 - la2*txLPF_y2;
+                txLPF_x2 = txLPF_x1; txLPF_x1 = yh;
+                txLPF_y2 = txLPF_y1; txLPF_y1 = yl;
+                resampledAudioIn[i] = yl;
+            }
+
+            // AGC: measure peak of gained block, update agcGain for next block
+            Ipp32f peakLevel;
+            ippsMaxAbs_32f(resampledAudioIn, 1280, &peakLevel);
+            if (peakLevel > 0.001f)
+            {
+                float desired = agcGain * agcTarget / peakLevel;
+                desired = fmaxf(agcMinGain, fminf(agcMaxGain, desired));
+                float coeff = (desired < agcGain) ? agcAttack : agcRelease;
+                agcGain += coeff * (desired - agcGain);
+            }
+
             // CESSB: real audio -> complex analytic SSB, then resample I and Q separately
+#ifdef ENABLE_CESSB
             ProcessCESSB(resampledAudioIn, cessbOut);
             for (int i = 0; i < CESSB_BLOCK; i++)
                 { cessbI[i] = cessbOut[i].re; cessbQ[i] = cessbOut[i].im; }
+#else
+            ippsCopy_32f(resampledAudioIn, cessbI, CESSB_BLOCK);
+            ippsZero_32f(cessbQ, CESSB_BLOCK);
+#endif
 
             int newSampleCount = 0, newSampleCountQ = 0;
             Ipp64f timeQ = time;
@@ -918,10 +1017,11 @@ void CRadio::TXDataLoop()
                 if (txPacketCount == 0)
                     ippsMul_32f32fc_I(TXHannWindow, TXIFFTAccum, 1024); // rising taper on first packet
 
-                for (int s = 0; s < 1024; s+=8)
+                for (int s = 0; s < 1024; s += 8 * 16)
                 {
-                    BuildTXPacket(writeData, &TXIFFTAccum[s]);
-                    WriteFile(hSerial, writeData, 33, &bytesWritten, NULL);
+                    for (int p = 0; p < 16; p++)
+                        BuildTXPacket(txBulkBuf + p * 33, &TXIFFTAccum[s + p * 8]);
+                    WriteFile(hSerial, txBulkBuf, 16 * 33, &bytesWritten, NULL);
                 }
                 ippsCopy_32fc(&TXIFFTAccum[2048], TXIFFTAccum, 1024);
                 ippsCopy_32fc(TXFFTData, &TXIFFTAccum[1024], 2048);
@@ -969,18 +1069,19 @@ void CRadio::TXDataLoop()
     // Final packet: overlap-add remaining tail, apply falling taper, send
     ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);
     ippsMul_32f32fc_I(&TXHannWindow[1024], TXIFFTAccum, 1024);
-    for (int s = 0; s < 1024; s += 8)
+    for (int s = 0; s < 1024; s += 8 * 16)
     {
-        BuildTXPacket(writeData, &TXIFFTAccum[s]);
-        WriteFile(hSerial, writeData, 33, &bytesWritten, NULL);
+        for (int p = 0; p < 16; p++)
+            BuildTXPacket(txBulkBuf + p * 33, &TXIFFTAccum[s + p * 8]);
+        WriteFile(hSerial, txBulkBuf, 16 * 33, &bytesWritten, NULL);
     }
 
     //Dump residual ADC data if any
-    Sleep(16);
-    if (ADCWaitingCounter)
-    {
-        ReadFile(hSerial, readData, 4 * ADCWaitingCounter, &bytesWritten, NULL);
-    }
+    //Sleep(16);
+    //if (ADCWaitingCounter)
+    //{
+    //    ReadFile(hSerial, readData, 4 * ADCWaitingCounter, &bytesWritten, NULL);
+    //}
 
     //Put back in receive mode
 
@@ -1052,7 +1153,12 @@ Ipp32fc CRadio::GetS11(Ipp32f* H2Window)
     }
 
     // Tune. Tone is offset by (LOfreq / 16384 Hz) / 46875.0 Hz
-    Ipp32f tuneFreq = LOfreq * 1.0e6 / (16384.0 * 46875.0);
+    Ipp32f tuneFreq = 1.0f - LOfreq * 1.0e6 / (16384.0 * 46875.0);
+
+    // Copy pre-tuning FWD data for image bin computation (FWD occupies indices 64..223)
+    Ipp32fc imageFwdBuf[224];
+    ippsCopy_32fc(RawIQData, imageFwdBuf, 224);
+
     TunerPhase = 0.0;
     ippsTone_32fc(TunerData, 250, 1.0, tuneFreq, &TunerPhase, ippAlgHintFast);
     ippsMul_32fc_I(TunerData, RawIQData, 250); // Tune in place
@@ -1065,6 +1171,17 @@ Ipp32fc CRadio::GetS11(Ipp32f* H2Window)
     ippsSum_32fc(&RawIQData[64], 160, &avgFwd, ippAlgHintAccurate);
     ippsSum_32fc(&RawIQData[314], 160, &avgRev, ippAlgHintAccurate);
     ippsDiv_32fc_A21(&avgRev, &avgFwd, &S11, 1); // S11 = Rev / FWD
+
+    // Image bin: apply conjugate tone to pre-tuning FWD data, window, sum.
+    // Phase is aligned to sample index 64 (start of FWD window in RawIQData).
+    Ipp32f imagePhase = 0.0f;
+    ippsTone_32fc(TunerData, 250, 1.0f, 1.0f-tuneFreq, &imagePhase, ippAlgHintFast);
+    ippsMul_32fc_I(TunerData, &imageFwdBuf[64], 160);
+    ippsMul_32f32fc_I(H2Window, &imageFwdBuf[64], 160);
+    Ipp32fc imageSum;
+    ippsSum_32fc(&imageFwdBuf[64], 160, &imageSum, ippAlgHintAccurate);
+    ippsDiv_32fc_A21(&imageSum, &avgFwd, &m_lastIQMu, 1); // μ = image / signal
+
     return S11;
 
 }
@@ -1209,6 +1326,7 @@ void CRadio::AntTuneDataLoop()
             myStatus->SmithChartUntuned[ifrqx2] = S11.re;
             myStatus->SmithChartUntuned[ifrqx2 + 1] = S11.im;
             myStatus->SWRUntuned[ifrq] = (1.0 + Rmag) / (1.0 - Rmag);
+            myVNACal->SweptIQMu[ifrq] = m_lastIQMu;
         }
 
         else if(ifrq >= 68)
@@ -1548,8 +1666,8 @@ int CRadio::Connect()
     SetFreq(LOfreq); //DEBUG: SET FREQ FROM FILE
     myStatus->RXFreq = LOfreq;
     Sleep(16);
-    SetRXBits();
-    Sleep(16);
+//    SetRXBits();
+//    Sleep(16);
 
     writeData[0] = '2'; // Enable 24 V
     writeData[1] = 'R'; //Change mode to RX
@@ -1560,7 +1678,7 @@ int CRadio::Connect()
 
     writeData[0] = 'C';
     writeData[1] = 0x20 + RelaySettings; 
-    writeData[2] = 0x20 + 0x3B; // FWD power
+    writeData[2] = 0x20 + 0x3E; // RX
     WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     Sleep(16);
 
