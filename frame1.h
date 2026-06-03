@@ -101,6 +101,8 @@ enum {
     ID_SWEEP_LOAD,
     ID_SWEEP_TUNER,
     ID_SWEEP_ANTENNA,
+    ID_AUDIO_MAX_MIC_GAIN,
+    ID_AUDIO_CESSB_SETPOINT,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -146,6 +148,9 @@ public:
     void B4Click(wxCommandEvent& event);
     void B5Click(wxCommandEvent& event);
     void B6Click(wxCommandEvent& event);
+    void B7Click(wxCommandEvent& event);
+    void B8Click(wxCommandEvent& event);
+    void B9Click(wxCommandEvent& event);
     void B10Click(wxCommandEvent& event);
     void OnCharHook(wxKeyEvent& event);
     void OnPaint(wxPaintEvent& event);
@@ -158,6 +163,8 @@ public:
     void OnSweepLoad(wxCommandEvent& event);
     void OnSweepTuner(wxCommandEvent& event);
     void OnSweepAntenna(wxCommandEvent& event);
+    void OnAudioMaxMicGain(wxCommandEvent& event);
+    void OnAudioCESSBSetpoint(wxCommandEvent& event);
     void UpdateDebugText(char* text);
 
     CRadio* myRadio;

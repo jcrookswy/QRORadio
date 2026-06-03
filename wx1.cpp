@@ -1,6 +1,7 @@
 // Start of wxWidgets "Hello World" Program
 #include <wx/wx.h>
 #include <wx/numdlg.h>
+#include <cmath>
 //#include "MyProjectBase.h"
 #include "frame1.h"
 #include "CRadio.h"
@@ -449,6 +450,10 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->Append(ID_SWEEP_TUNER,   _("Sweep &Tuner"));
     radioMenu->Append(ID_SWEEP_ANTENNA, _("Sweep &Antenna"));
     menuBar->Append(radioMenu, _("&Radio"));
+    wxMenu* audioMenu = new wxMenu();
+    audioMenu->Append(ID_AUDIO_MAX_MIC_GAIN,    _("Max Mic Gain (dB)"));
+    audioMenu->Append(ID_AUDIO_CESSB_SETPOINT,  _("CESSB Setpoint (dB)"));
+    menuBar->Append(audioMenu, _("&Audio"));
     this->SetMenuBar(menuBar);
     Bind(wxEVT_MENU, &MyFrame::OnFileLoad,   this, wxID_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnFileSave,   this, wxID_SAVE);
@@ -458,6 +463,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
     Bind(wxEVT_MENU, &MyFrame::OnSweepTuner,   this, ID_SWEEP_TUNER);
     Bind(wxEVT_MENU, &MyFrame::OnSweepAntenna, this, ID_SWEEP_ANTENNA);
+    Bind(wxEVT_MENU, &MyFrame::OnAudioMaxMicGain,   this, ID_AUDIO_MAX_MIC_GAIN);
+    Bind(wxEVT_MENU, &MyFrame::OnAudioCESSBSetpoint, this, ID_AUDIO_CESSB_SETPOINT);
 
     myRadio = new CRadio();//Do this after frame exists
 
@@ -581,7 +588,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
  //   gSizer1->Add(m_slider1, 0, wxALL, 5);
     gSizer1->Add(gSizer3, 0, wxALL, 5);
 
-    m_button10 = new wxButton(this, wxID_ANY, _("[SP] to TX = N"), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button10 = new wxButton(this, wxID_ANY, _("Hotkeys = N"), wxDefaultPosition, wxSize(180, 40), 0);
     m_button10->SetFont(bf);
     m_button10->SetBackgroundColour(wxColor(32, 32, 32));
     m_button10->SetForegroundColour(wxColor(255, 255, 128));
@@ -610,6 +617,9 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button4->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B4Click), NULL, this);
     m_button5->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B5Click), NULL, this);
     m_button6->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B6Click), NULL, this);
+    m_button7->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B7Click), NULL, this);
+    m_button8->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B8Click), NULL, this);
+    m_button9->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B9Click), NULL, this);
     m_button10->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B10Click), NULL, this);
 
     SPtoTX = false;
@@ -679,6 +689,32 @@ void MyFrame::OnSweepTuner(wxCommandEvent& event) {
 void MyFrame::OnSweepAntenna(wxCommandEvent& event) {
     myRadio->myStatus->calMode = 5;
     myRadio->myStatus->mode = 3;
+}
+
+void MyFrame::OnAudioMaxMicGain(wxCommandEvent& event)
+{
+    double currentdB = 20.0 * log10((double)myRadio->agcMaxGain);
+    wxString input = wxGetTextFromUser(
+        _("Enter maximum mic gain in dB (20 dB = 10x linear):"),
+        _("Max Mic Gain (dB)"),
+        wxString::Format("%.1f", currentdB), this);
+    if (input.IsEmpty()) return;
+    double dB;
+    if (input.ToDouble(&dB))
+        myRadio->agcMaxGain = (float)pow(10.0, dB / 20.0);
+}
+
+void MyFrame::OnAudioCESSBSetpoint(wxCommandEvent& event)
+{
+    double currentdB = 20.0 * log10((double)myRadio->agcTarget);
+    wxString input = wxGetTextFromUser(
+        _("Enter CESSB AGC setpoint in dB (overdrive level into clipper):"),
+        _("CESSB Setpoint (dB)"),
+        wxString::Format("%.1f", currentdB), this);
+    if (input.IsEmpty()) return;
+    double dB;
+    if (input.ToDouble(&dB))
+        myRadio->agcTarget = (float)pow(10.0, dB / 20.0);
 }
 
 void MyFrame::OnPaint(wxPaintEvent& event)
@@ -761,10 +797,32 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     myRadio->NewLOFreq = true;
 }
 
+void MyFrame::B7Click(wxCommandEvent& event) // Step down
+{
+    myRadio->LOfreq -= myRadio->stepSize / 1e6f;
+    m_textCtrl1->SetValue(wxString::Format("%.5f", myRadio->LOfreq));
+    myRadio->NewLOFreq = true;
+}
+
+void MyFrame::B8Click(wxCommandEvent& event) // Step up
+{
+    myRadio->LOfreq += myRadio->stepSize / 1e6f;
+    m_textCtrl1->SetValue(wxString::Format("%.5f", myRadio->LOfreq));
+    myRadio->NewLOFreq = true;
+}
+
+void MyFrame::B9Click(wxCommandEvent& event) // Hz (update step size)
+{
+    wxString value = m_textCtrl2->GetValue();
+    double step;
+    if (value.ToDouble(&step))
+        myRadio->stepSize = (float)step;
+}
+
 void MyFrame::B10Click(wxCommandEvent& event)
 {
     SPtoTX = !SPtoTX;
-    m_button10->SetLabelText(SPtoTX ? _("T/R Keys Enabled") : _("T/R Keys Disabled"));
+    m_button10->SetLabelText(SPtoTX ? _("Hotkeys = Y") : _("Hotkeys = N"));
 }
 
 void MyFrame::OnCharHook(wxKeyEvent& event)
@@ -774,6 +832,8 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
         int key = event.GetKeyCode();
         if (key == 'T') { myRadio->myStatus->mode = TX_MODE; return; }
         if (key == 'R') { myRadio->myStatus->mode = RX_MODE; return; }
+        if (key == WXK_RIGHT) { wxCommandEvent dummy; B8Click(dummy); return; }
+        if (key == WXK_LEFT)  { wxCommandEvent dummy; B7Click(dummy); return; }
     }
     event.Skip();
 }

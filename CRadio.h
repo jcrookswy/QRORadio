@@ -105,7 +105,10 @@ public:
 	Ipp32f*  cessbQ;    // Q channel split for resampler, 1280 samples
 
 	float LOfreq;
+	float stepSize;
 	float micGain;
+	float agcMaxGain;
+	float agcTarget;
 	bool NewLOFreq;
 
 	Ipp32f* MagData ;

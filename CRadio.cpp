@@ -207,6 +207,9 @@ CRadio::CRadio()
 {
     ippInit();                      // Initialize Intel� IPP library 
     micGain = 2.5;
+    stepSize = 1000.0f;
+    agcMaxGain = 10.0f;
+    agcTarget  = 4.0f;
 
     audioInBuf = new Ipp32f[16384];
     audioOutBuf = new Ipp32f[16384];
@@ -514,9 +517,10 @@ void CRadio::UpdateADCs(char * readData)
  //       int g = 0;
 
 	int val = ((readData[0] - 0x20) << 6) | (readData[1] - 0x20);
-	myStatus->volts = (36.3 / 4096.0) * val;
+    myStatus->volts =  (36.3 / 4096.0)* val;
 	val = ((readData[2] - 0x20) << 6) | (readData[3] - 0x20);
-    myStatus->amps = (66.0 / 4096.0) * val;
+ //   myStatus->amps = (66.0 / 4096.0) * val;
+    myStatus->amps = (66.0 / 8192.0)* val;
     myStatus->UpdateText = true;
 
 }
@@ -530,16 +534,22 @@ void CRadio::RXDataLoop()
     DWORD bytesToWrite = 4;
     bool bypassALC = true;
     int ALCCounter = 0;
+
+    PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR); 
+
+    writeData[0] = 'a'; // ADC payload
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // query adc values once
+    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
+    UpdateADCs(readData); 
+
     for (int i = 0; i < 8; i++)
-        writeData[i] = 'B'; // Let's make 'B' send 250 I/Q, our processing size
-   // writeData[8] = 'A';//Get voltage / current
+        writeData[i] = 'b'; // Let's make 'b' send 250 I/Q, our processing size
+   // writeData[8] = 'a';//Get voltage / current
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     bool OKtoProcess = false;
     while (RX_MODE == myStatus->mode) // Continue until mode changes
     {
         WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); //queue up 8 * 250 IQ values
-        ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
-        UpdateADCs(readData);
         //int val = ((readData[0] - 0x20) << 6) | (readData[1] - 0x20);
         //myStatus->volts = (36.3 / 4096.0) * val;
         //val = ((readData[2] - 0x20) << 6) | (readData[3] - 0x20);
@@ -567,16 +577,16 @@ void CRadio::RXDataLoop()
         else bypassALC = false;
     }
     //Final xfer
-    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
+//    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
     for (int i = 0; i < 200; i++) // 2000 bytes = 250 I/Q
     {
         ReadFile(hSerial, readData, 40, &bytesWritten, NULL);
         //ProcessIQ(readData);
     }
-    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
+//    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
 
-    writeData[0] = 'I';
-    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
+    writeData[0] = 'i';
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in idle mode
 
 }
 
@@ -669,8 +679,8 @@ static void BandpassOneSided(Ipp32fc* pData)
 
 int debug_xyz = 0;
 int g_min_amp = 32;
-int g_max_amp = 180;
-int g_abs_max_amp = 207;
+int g_max_amp = 240;
+int g_abs_max_amp = 276;
 
 #define DBG_MAX_AMP 250 // 70 seems to be 10% output 250 = 166W. 280 = 207W
 //#define DBG_MAX_AMP 210 // 70 seems to be 10% output
@@ -681,45 +691,36 @@ void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 {
     static int lastPhase = 0;
     static float remainder = 0.0;
-    Ipp32f ampl[8];
-    Ipp32f phase[8];
-    ippsMagnitude_32fc(pIQ, ampl, 8);
-    ippsPhase_32fc(pIQ, phase, 8);
+    Ipp32f ampl[32];
+    Ipp32f phase[32];
+    ippsMagnitude_32fc(pIQ, ampl, 32);
+    ippsPhase_32fc(pIQ, phase, 32);
 
-    *(wd++) = 'D';
-    int iAmpl[8];
-    int iPhase[8];
-//    int iPhaseDelta[8];
+    *(wd++) = 'd';
+    int iPhase[32];
     int delta;
     int amp;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 32; i++)
     {
         iPhase[i] = floor(1024.0 * phase[i] / IPP_2PI + 0.5); //round
         if (i == 0) delta = iPhase[0] - lastPhase;
         else delta = iPhase[i] - iPhase[i - 1];
         if (delta < 0) delta += 1024;
         if (delta > 1023) delta -= 1024; //Possible
-//        iPhaseDelta[i] = delta;
 
-       // if (ampl[i] > 1.0)
-        //amp = floor(ampl[i] * 312.0 + 0.5);
-       // amp = floor(ampl[i] * 200.0 + 0.5); 
-
-       amp = floor(ampl[i] * g_max_amp + remainder + 0.5);
-       remainder += ampl[i] * g_max_amp - amp; // Carry remainder to approximate extra bits
+        amp = floor(ampl[i] * g_max_amp + remainder + 0.5);
+        remainder += ampl[i] * g_max_amp - amp; // Carry remainder to approximate extra bits
 
         if (amp > g_abs_max_amp) amp = g_abs_max_amp; // max is 1.0, abs max is just below modulator clipping
         if (amp < 0) amp = 0;
         amp += g_min_amp; // this is "barely off"
-        //amp = 31;//debug
 
         *(wd++) = 0x20 + (delta >> 6);
         *(wd++) = 0x20 + (delta & 0x3F);
         *(wd++) = 0x20 + (amp >> 6);
         *(wd++) = 0x20 + (amp & 0x3F);
     }
-    lastPhase = iPhase[7];
-
+    lastPhase = iPhase[31];
 }
 void CRadio::BuildGainRamp(float * ramp, float GainPA, float GainAB, float GainBC)
 {
@@ -875,14 +876,11 @@ DWORD GetBytesAvailable(HANDLE hComm) {
 
 void CRadio::TXDataLoop()
 {
-    char writeData[64];
+    char writeData[132]; // 1 header + 32 IQ pairs × 4 bytes = 129 bytes
     char readData[64];
-    char txBulkBuf[16 * 33]; // 16 packets × 33 bytes, sent in one WriteFile call
     DWORD bytesWritten = 0;
-    float agcGain      = 1.0f;
-    const float agcMaxGain  = 10.0f;   // +20 dB max boost
-    const float agcMinGain  = 1.0f;    // 
-    const float agcTarget   = 4.0f;     // target peak level into CESSB (overdrive the clipper)
+    float agcGain           = 1.0f;
+    const float agcMinGain  = 1.0f;
     const float agcAttack   = 0.41f;    // per-block attack  (~50 ms at 1280/48k blocks)
     const float agcRelease  = 0.065f;   // per-block release (~400 ms)
     int txPacketCount = 0;
@@ -914,17 +912,17 @@ void CRadio::TXDataLoop()
     int ResampleOutCount = 0;
 
     ippsZero_32fc(TXIFFTAccum, 3072); //Re-use IFFT accumulator. This will also be used to raised-cosine taper rising / falling edge of audio
- 
-    PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
-    InitCESSB(); // Clear overlap history so each transmission starts clean
-
-    writeData[0] = 'T'; // Transmit mode
-    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
-    Sleep(32);//Wait for command / relays
 
     audioInRdPtr = audioInWrPtr; // Purge old audio
     audioInRdPtr = audioInRdPtr & 0xFF00; // round down
     if (audioInRdPtr >= 16384) audioInRdPtr = 0;
+
+    PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+    InitCESSB(); // Clear overlap history so each transmission starts clean
+
+    writeData[0] = 't'; // Transmit mode
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+    Sleep(32);//Wait for command / relays
 
     while (TX_MODE == myStatus->mode) // Continue until mode changes
     {
@@ -1017,11 +1015,10 @@ void CRadio::TXDataLoop()
                 if (txPacketCount == 0)
                     ippsMul_32f32fc_I(TXHannWindow, TXIFFTAccum, 1024); // rising taper on first packet
 
-                for (int s = 0; s < 1024; s += 8 * 16)
+                for (int s = 0; s < 1024; s += 32)
                 {
-                    for (int p = 0; p < 16; p++)
-                        BuildTXPacket(txBulkBuf + p * 33, &TXIFFTAccum[s + p * 8]);
-                    WriteFile(hSerial, txBulkBuf, 16 * 33, &bytesWritten, NULL);
+                    BuildTXPacket(writeData, &TXIFFTAccum[s]);
+                    WriteFile(hSerial, writeData, 129, &bytesWritten, NULL);
                 }
                 ippsCopy_32fc(&TXIFFTAccum[2048], TXIFFTAccum, 1024);
                 ippsCopy_32fc(TXFFTData, &TXIFFTAccum[1024], 2048);
@@ -1045,7 +1042,7 @@ void CRadio::TXDataLoop()
 			//if (ADCReadInterval == 0)
 			//{
 			//	ADCReadInterval = 16;
-			//	writeData[0] = 'A'; // Read back ADC 
+			//	writeData[0] = 'a'; // Read back ADC
 			//	WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
 			//	ADCWaitingCounter++;
 			//	//myStatus->volts = audioInRdPtr * 0.001;//DEBUG
@@ -1069,11 +1066,10 @@ void CRadio::TXDataLoop()
     // Final packet: overlap-add remaining tail, apply falling taper, send
     ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);
     ippsMul_32f32fc_I(&TXHannWindow[1024], TXIFFTAccum, 1024);
-    for (int s = 0; s < 1024; s += 8 * 16)
+    for (int s = 0; s < 1024; s += 32)
     {
-        for (int p = 0; p < 16; p++)
-            BuildTXPacket(txBulkBuf + p * 33, &TXIFFTAccum[s + p * 8]);
-        WriteFile(hSerial, txBulkBuf, 16 * 33, &bytesWritten, NULL);
+        BuildTXPacket(writeData, &TXIFFTAccum[s]);
+        WriteFile(hSerial, writeData, 129, &bytesWritten, NULL);
     }
 
     //Dump residual ADC data if any
@@ -1090,8 +1086,8 @@ void CRadio::TXDataLoop()
     ippsFree(pTFFTWorkBuf);
  //   ippsFree(pTFFTSpec);
 
-    writeData[0] = 'I';
-    writeData[1] = 'R';
+    writeData[0] = 'i';
+    writeData[1] = 'r';
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); 
     myStatus->mode = RX_MODE;
 }
@@ -1138,8 +1134,8 @@ Ipp32fc CRadio::GetS11(Ipp32f* H2Window)
     char readData[64];
     DWORD bytesWritten = 0;
 
-    writeData[0] = 'V'; // VNA mode. Auto switches to REV pwr
-    writeData[1] = 'b'; // read FWD Each one is 125 I/Q pairs
+    writeData[0] = 'v'; // VNA mode. Auto switches to REV pwr
+    writeData[1] = 'x'; // read FWD Each one is 125 I/Q pairs
     FlushFileBuffers(hSerial);
     Sleep(50);
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); // queue up 8 * 250 IQ values
@@ -1201,11 +1197,11 @@ void CRadio::AntTuneSweepOSL(int osl)
 
     IQWriteAddr = 0;
 
-    writeData[0] = 'v'; // prep vna
+    writeData[0] = 'w'; // prep vna
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     Sleep(16);
 
-    writeData[0] = 'C';
+    writeData[0] = 'c';
     writeData[1] = 0x20; // Bypass
     writeData[2] = 0x20 + 0x3B; // FWD power
     WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
@@ -1218,7 +1214,7 @@ void CRadio::AntTuneSweepOSL(int osl)
         thisFreq = 14.0 + ifrq * 0.01;
         SetFreq(thisFreq); //10 kHz steps
 
-        writeData[0] = 'v'; // idle vna mode
+        writeData[0] = 'w'; // idle vna mode
         WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
         Sleep(16);
         ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
@@ -1243,7 +1239,7 @@ void CRadio::AntTuneSweepOSL(int osl)
     SetRXBits();
 
     Sleep(16);
-    writeData[0] = 'R';
+    writeData[0] = 'r';
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
     myStatus->mode = 1;
 
@@ -1276,12 +1272,12 @@ void CRadio::AntTuneDataLoop()
     float lastLO = LOfreq;
     int bestRelaySetting = 0;
 
-	writeData[0] = 'v'; // prep vna
+	writeData[0] = 'w'; // prep vna
 	WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
 	Sleep(16);
     SetFreq(14.25); //10 kHz steps
 
-    writeData[0] = 'C';
+    writeData[0] = 'c';
     writeData[1] = 0x20 ; // Bypass
     writeData[2] = 0x20 + 0x3B; // FWD power
     WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
@@ -1298,7 +1294,7 @@ void CRadio::AntTuneDataLoop()
         else thisFreq = 14.0 + (ifrq - 68) * 0.01;
         SetFreq(thisFreq); //10 kHz steps
 
-        writeData[0] = 'v'; // idle vna mode
+        writeData[0] = 'w'; // idle vna mode
         WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
         Sleep(16);
         ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
@@ -1308,7 +1304,7 @@ void CRadio::AntTuneDataLoop()
         if ((ifrq > 36) && (ifrq < 69)) // All indices where we change relay states
         {
             RelaySettings = (ifrq == 68) ? bestRelaySetting : ifrq - 36;
-			writeData[0] = 'C';
+			writeData[0] = 'c';
 			writeData[1] = 0x20 + RelaySettings;
 			writeData[2] = 0x20 + 0x3B; // FWD power
 			WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
@@ -1360,7 +1356,7 @@ void CRadio::AntTuneDataLoop()
 
 	Sleep(16);
 
-    writeData[0] = 'R';
+    writeData[0] = 'r';
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
     myStatus->mode = 1;
 
@@ -1380,11 +1376,11 @@ void CRadio::SweepAntTune()
 
 	IQWriteAddr = 0;
 
-	writeData[0] = 'v'; // prep vna
+	writeData[0] = 'w'; // prep vna
 	WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
 	Sleep(16);
 
-	writeData[0] = 'C';
+	writeData[0] = 'c';
 	writeData[1] = 0x20; // Bypass
 	writeData[2] = 0x20 + 0x3B; // FWD power
 	WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
@@ -1394,7 +1390,7 @@ void CRadio::SweepAntTune()
 
 	for (int r = 0; r < 36; r++)//36 @ bypass, 32@14.25 GHz across settings, 36@best setting
 	{
-		writeData[0] = 'v'; // idle vna mode
+		writeData[0] = 'w'; // idle vna mode
 		WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
 		Sleep(16);
 		ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
@@ -1402,7 +1398,7 @@ void CRadio::SweepAntTune()
 			int g = 0;
 
 		RelaySettings = r & 0x1F;
-		writeData[0] = 'C';
+		writeData[0] = 'c';
 		writeData[1] = 0x20 + RelaySettings;
 		writeData[2] = 0x20 + 0x3B; // FWD power
 		WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
@@ -1424,9 +1420,9 @@ void CRadio::SweepAntTune()
 
 	Sleep(16);
 
-	//writeData[0] = 'I';
+	//writeData[0] = 'i';
 	//WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
-	writeData[0] = 'R';
+	writeData[0] = 'r';
 	WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
 	myStatus->mode = 1;
 
@@ -1449,7 +1445,7 @@ int CRadio::DataThread()
         if (myStatus->mode == IDLE_MODE)
         {
             char writeData[4];
-            writeData[0] = '0';
+            writeData[0] = 'h';
             DWORD bytesWritten = 0;
             WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Turn off 24V
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
@@ -1523,7 +1519,7 @@ int CRadio::SetFreq(float freqMHz)
     DWORD bytesWritten = 0;
     LOfreq = freqMHz;
     m_iFreq = LOfreq * 1000000;
-    writeData[0] = 'F';
+    writeData[0] = 'f';
     writeData[1] = 0x20 + ((m_iFreq >> 18) & 0x3F);
     writeData[2] = 0x20 + ((m_iFreq >> 12) & 0x3F);
     writeData[3] = 0x20 + ((m_iFreq >> 6) & 0x3F);
@@ -1537,7 +1533,7 @@ int CRadio::SetRXBits()
     char writeData[8];
     DWORD bytesWritten = 0;
 
-    writeData[0] = 'C';
+    writeData[0] = 'c';
     writeData[1] = 0x20 + RelaySettings;
     writeData[2] = 0x20 + 0x3E; // actual input
 
@@ -1669,14 +1665,14 @@ int CRadio::Connect()
 //    SetRXBits();
 //    Sleep(16);
 
-    writeData[0] = '2'; // Enable 24 V
-    writeData[1] = 'R'; //Change mode to RX
-//    writeData[2] = 'B';// Read bogus data
-//    writeData[3] = 'B';
+    writeData[0] = 'g'; // Enable 24 V
+    writeData[1] = 'r'; //Change mode to RX
+//    writeData[2] = 'b';// Read bogus data
+//    writeData[3] = 'b';
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); // Set frequency
     Sleep(100);
 
-    writeData[0] = 'C';
+    writeData[0] = 'c';
     writeData[1] = 0x20 + RelaySettings; 
     writeData[2] = 0x20 + 0x3E; // RX
     WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
