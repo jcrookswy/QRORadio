@@ -179,7 +179,7 @@ void SmithPlot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numEleme
 
 //Plot widget (float)
 //inputs: array size, array pointer, x offset, y offset, x size, y size, y min, y max, horz grat count, vert grat count
-void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, float* data, float ymin, float ymax, int hgrat, int ygrat, wchar_t* text, int wfallPix = 0)
+void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, float* data, float ymin, float ymax, int hgrat, int ygrat, wchar_t* text, int wfallPix = 0, int shadeL = -1, int shadeR = -1)
 {
     // draw a rectangle
     dc.SetBrush(wxBrush(wxColor(48, 48, 48))); //
@@ -211,6 +211,16 @@ void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, f
     }
 
 
+    // Optional passband shading (e.g. USB region) — drawn before graticules so lines show on top
+    if (shadeL >= 0 && shadeR > shadeL && numElements > 1)
+    {
+        int sx0 = xofs + shadeL * xsize / (numElements - 1);
+        int sx1 = xofs + shadeR * xsize / (numElements - 1);
+        dc.SetBrush(wxBrush(wxColor(58, 58, 58)));
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.DrawRectangle(sx0, yofs, sx1 - sx0, ysize);
+    }
+
     //dc.SetBrush(*wxBLACK_BRUSH); // black filling
     dc.SetPen(wxPen(wxColor(255, 255, 255), 1)); // 1-pixels-thick pink outline
     //dc.DrawRectangle(xofs, yofs, xsize , ysize ); // Draw outer perimeter
@@ -225,24 +235,23 @@ void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, f
         dc.DrawLine(xpos, yofs, xpos, ysize + yofs); // draw line across the rectangle
     }
 
+    dc.SetClippingRegion(xofs, yofs, xsize, ysize);
     dc.SetPen(wxPen(wxColor(255, 255, 128), 2)); // yellow pen
     int xposLast = 0;
     int yposLast = 0;
     for (int i = 0; i < numElements; i++)
     {
-        int xpos = (int)(xofs + 1.0 * i * xsize / (numElements-1));
-        int ypos = (int)(yofs + (ymax - data[i] ) * ysize / (ymax - ymin));
+        int xpos = (int)(xofs + 1.0 * i * xsize / (numElements - 1));
+        int ypos = (int)(yofs + (ymax - data[i]) * ysize / (ymax - ymin));
         if (ypos < yofs) ypos = yofs;
         if (ypos > (yofs + ysize)) ypos = yofs + ysize;
 
-        if(i > 0)
-            dc.DrawLine(xposLast, yposLast, xpos, ypos); // draw line across the rectangle
+        if (i > 0)
+            dc.DrawLine(xposLast, yposLast, xpos, ypos);
         xposLast = xpos;
         yposLast = ypos;
     }
-
-    // dc.SetPen(wxPen(wxColor(255, 0, 0), 1)); // 1-pixel-thick graticule
-
+    dc.DestroyClippingRegion();
 }
 
 void Plot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, float* data, float ymin, float ymax, int hgrat, int ygrat, wchar_t* text, float* data2)
@@ -436,7 +445,8 @@ void BasicDrawPane::render(wxDC& dc)
         float dBmTop   = dBmFloor + pRadio->plotSunits * 6.0f;
         float ymin = (dBmFloor - pRadio->plotSoffset + 46.94f) / 20.0f;
         float ymax = (dBmTop   - pRadio->plotSoffset + 46.94f) / 20.0f;
-        Plot(dc, margin, botY, botW, botH, 250, pRadio->myStatus->RFFreqPlot, ymin, ymax, pRadio->plotSunits, 8, plot7Label, 0);
+        // shadeL=125 (DC center), shadeR=141 (center+3 kHz = 16 bins × 187.5 Hz)
+        Plot(dc, margin, botY, botW, botH, 250, pRadio->myStatus->RFFreqPlot, ymin, ymax, pRadio->plotSunits, 8, plot7Label, 0, 125, 141);
     }
     isPartial = false;
 };
@@ -885,7 +895,6 @@ void MyFrame::OnTimer(wxTimerEvent& event)
     gmtime_s(&gmt, &now);
     sprintf_s(myRadio->myStatus->GMTTime, "%02d:%02d:%02d UTC",
               gmt.tm_hour, gmt.tm_min, gmt.tm_sec);
-    myRadio->myStatus->UpdateText = true;
 
     wchar_t label[16];// = _T("RF Power vs Freq, 14-14.35 MHz, 50 kHz/, 10 dB/");
     mbstowcs(label, myRadio->dbgText, 16);
@@ -940,6 +949,7 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     value.ToDouble(&freq);
     myRadio->LOfreq = freq;
     myRadio->NewLOFreq = true;
+    myRadio->myStatus->UpdateText = true;
 }
 
 void MyFrame::B7Click(wxCommandEvent& event) // Step down
@@ -948,6 +958,7 @@ void MyFrame::B7Click(wxCommandEvent& event) // Step down
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
+    myRadio->myStatus->UpdateText = true;
 }
 
 void MyFrame::B8Click(wxCommandEvent& event) // Step up
@@ -956,6 +967,7 @@ void MyFrame::B8Click(wxCommandEvent& event) // Step up
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
+    myRadio->myStatus->UpdateText = true;
 }
 
 void MyFrame::B9Click(wxCommandEvent& event) // Hz (update step size)

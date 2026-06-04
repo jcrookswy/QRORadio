@@ -1548,7 +1548,6 @@ int CRadio::UpdatePlot()
         int sunit = 9 + (int)roundf((dBm + 73.0f) / 6.0f);
         if (sunit < 0) sunit = 0;
         myStatus->Sunit = sunit;
-        myStatus->UpdateText = true;
     }
 
 	return 0;
