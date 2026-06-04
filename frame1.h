@@ -103,6 +103,7 @@ enum {
     ID_SWEEP_ANTENNA,
     ID_AUDIO_MAX_MIC_GAIN,
     ID_AUDIO_CESSB_SETPOINT,
+    ID_PLOT_SETTINGS,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -123,6 +124,7 @@ protected:
     wxButton* m_button8;
     wxButton* m_button9;
     wxButton* m_button10;
+    wxButton* m_button11;
     wxSlider* m_slider1;
     wxTextCtrl* m_textCtrl1;
     wxTextCtrl* m_textCtrl2;
@@ -165,10 +167,13 @@ public:
     void OnSweepAntenna(wxCommandEvent& event);
     void OnAudioMaxMicGain(wxCommandEvent& event);
     void OnAudioCESSBSetpoint(wxCommandEvent& event);
+    void OnPlotSettings(wxCommandEvent& event);
+    void BLogClick(wxCommandEvent& event);
     void UpdateDebugText(char* text);
 
-    CRadio* myRadio;
-    bool SPtoTX;
+    CRadio*   myRadio;
+    bool      SPtoTX;
+    wxString  RemoteCallsign;
     wxDECLARE_EVENT_TABLE();
 
 };

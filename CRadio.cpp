@@ -153,7 +153,7 @@ bool CRadio::SaveSettings(const char* path)
 
     fprintf(f, "{\n");
     fprintf(f, "  \"comPort\": %d,\n", comPort);
-    fprintf(f, "  \"LOfreq\": %f,\n", LOfreq);
+    fprintf(f, "  \"LOfreq\": %lf,\n", LOfreq);
     fprintf(f, "  \"RelaySettings\": %d,\n", RelaySettings);
 
     const char*  names[]  = { "SweptOpen", "SweptShort", "SweptLoad", "SweptIQMu" };
@@ -184,9 +184,9 @@ bool CRadio::LoadSettings(const char* path)
     char line[256];
     while (fgets(line, sizeof(line), f))
     {
-        int ival; float fval, re, im;
+        int ival; float fval, re, im; double dval = 0.0;
         if      (sscanf_s(line, " \"comPort\": %d",       &ival) == 1) comPort       = ival;
-        else if (sscanf_s(line, " \"LOfreq\": %f",        &fval) == 1) LOfreq        = fval;
+        else if (sscanf_s(line, " \"LOfreq\": %lf",       &dval) == 1) LOfreq        = dval;
         else if (sscanf_s(line, " \"RelaySettings\": %d", &ival) == 1) RelaySettings = ival;
         else if (strstr(line, "\"SweptOpen\""))        { calSection = 0; calIdx = 0; }
         else if (strstr(line, "\"SweptShort\""))       { calSection = 1; calIdx = 0; }
@@ -207,9 +207,17 @@ CRadio::CRadio()
 {
     ippInit();                      // Initialize Intel� IPP library 
     micGain = 2.5;
-    stepSize = 1000.0f;
+    stepSize = 1000.0;
     agcMaxGain = 10.0f;
     agcTarget  = 4.0f;
+    RXChannelPower  = 0.0f;
+    rxPowerPeakIdx  = 0;
+    rxPowerBlockPos = 0;
+    rxPowerBlockMax = 0.0f;
+    memset(rxPowerPeaks, 0, sizeof(rxPowerPeaks));
+    plotSfloor  = 2;
+    plotSunits  = 11;
+    plotSoffset = 0.0f;
 
     audioInBuf = new Ipp32f[16384];
     audioOutBuf = new Ipp32f[16384];
@@ -430,9 +438,32 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
         //ippsAdd_32fc_I(IFFTData, &IFFTAccum[i * 128 + 128], 128);
     }   //Repeat once
 
-    //For plotting //    
+    //For plotting //
     ippsMagnitude_32fc(DFTData, MagData, 250);
-    
+
+    // Channel power: sum bins 0-16 (0 to +3 kHz at 187.5 Hz/bin), divide by Hann noise BW
+    {
+        float chanPow = 0.0f;
+        for (int k = 0; k <= 16; k++)
+        {
+            float m = MagData[k] / 125.0f; // normalize for N=250 DFT and Hann coherent gain 0.5
+            chanPow += m * m;
+        }
+        chanPow /= 1.5f;
+        if (chanPow > rxPowerBlockMax) rxPowerBlockMax = chanPow;
+        if (++rxPowerBlockPos >= 16)
+        {
+            rxPowerPeaks[rxPowerPeakIdx] = rxPowerBlockMax;
+            if (++rxPowerPeakIdx >= 32) rxPowerPeakIdx = 0;
+            rxPowerBlockPos = 0;
+            rxPowerBlockMax = 0.0f;
+            float peak = 0.0f;
+            for (int n = 0; n < 32; n++)
+                if (rxPowerPeaks[n] > peak) peak = rxPowerPeaks[n];
+            RXChannelPower = peak;
+        }
+    }
+
     if (ClearMagAccum)
         MinMaxCounter = 0;
     ClearMagAccum = false;
@@ -1149,7 +1180,7 @@ Ipp32fc CRadio::GetS11(Ipp32f* H2Window)
     }
 
     // Tune. Tone is offset by (LOfreq / 16384 Hz) / 46875.0 Hz
-    Ipp32f tuneFreq = 1.0f - LOfreq * 1.0e6 / (16384.0 * 46875.0);
+    Ipp32f tuneFreq = (Ipp32f)(1.0 - LOfreq * 1.0e6 / (16384.0 * 46875.0));
 
     // Copy pre-tuning FWD data for image bin computation (FWD occupies indices 64..223)
     Ipp32fc imageFwdBuf[224];
@@ -1189,7 +1220,7 @@ void CRadio::AntTuneSweepOSL(int osl)
     char readData[64];
     DWORD bytesWritten = 0;
     DWORD bytesToWrite = 4;
-    float lastLO = LOfreq;
+    double lastLO = LOfreq;
 
     Ipp32f H2Window[160];
     for (int i = 0; i < 160; i++)
@@ -1269,7 +1300,7 @@ void CRadio::AntTuneDataLoop()
         H2Window[i] = 0.5 - 0.5 * cos(IPP_2PI * i / 160);
 
     IQWriteAddr = 0;
-    float lastLO = LOfreq;
+    double lastLO = LOfreq;
     int bestRelaySetting = 0;
 
 	writeData[0] = 'w'; // prep vna
@@ -1510,15 +1541,24 @@ int CRadio::UpdatePlot()
     memcpy(&myStatus->RFFreqPlot[125], LogMagData, 125 * 4);
     memcpy(myStatus->RFFreqPlot, &LogMagData[125], 125 * 4);
 
+    // S-unit: power=1.0 → -5 dBm, S9 = -73 dBm, 6 dB per S-unit
+    if (RX_MODE == myStatus->mode && RXChannelPower > 0.0f)
+    {
+        float dBm = 10.0f * log10f(RXChannelPower) - 5.0f + plotSoffset;
+        int sunit = 9 + (int)roundf((dBm + 73.0f) / 6.0f);
+        if (sunit < 0) sunit = 0;
+        myStatus->Sunit = sunit;
+        myStatus->UpdateText = true;
+    }
 
 	return 0;
 }
-int CRadio::SetFreq(float freqMHz)
+int CRadio::SetFreq(double freqMHz)
 {
     char writeData[8];
     DWORD bytesWritten = 0;
     LOfreq = freqMHz;
-    m_iFreq = LOfreq * 1000000;
+    m_iFreq = (int)round(LOfreq * 1000000.0);
     writeData[0] = 'f';
     writeData[1] = 0x20 + ((m_iFreq >> 18) & 0x3F);
     writeData[2] = 0x20 + ((m_iFreq >> 12) & 0x3F);

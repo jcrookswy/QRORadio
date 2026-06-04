@@ -2,6 +2,8 @@
 #include <wx/wx.h>
 #include <wx/numdlg.h>
 #include <cmath>
+#include <ctime>
+#include <fstream>
 //#include "MyProjectBase.h"
 #include "frame1.h"
 #include "CRadio.h"
@@ -75,9 +77,13 @@ void SmithPlot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElemen
     xsize -= 6;
     ysize -= 6;
 
-    dc.DrawText(text, xofs + 10, yofs + 3);
-    yofs += 24;
-    ysize -= 24;
+    {
+        wxSize tsz = dc.GetTextExtent(text);
+        int titleH = tsz.GetHeight() + 6;
+        dc.DrawText(text, xofs + 10, yofs + 3);
+        yofs += titleH;
+        ysize -= titleH;
+    }
 
     dc.SetPen(wxPen(wxColor(255, 255, 255), 1)); // 1-pixels-thick pink outline
     int radius = xsize >> 1;
@@ -145,9 +151,13 @@ void SmithPlot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numEleme
 {
     SmithPlot(dc, xofs, yofs, xsize, ysize, numElements, data, text);
     xofs += 3; // Border and scale to match "plot"
-    yofs += 27;
+    {
+        wxSize tsz = dc.GetTextExtent(text);
+        int titleH = tsz.GetHeight() + 6;
+        yofs += 3 + titleH;
+        ysize -= 6 + titleH;
+    }
     xsize -= 6;
-    ysize -= 30;
     int radius = xsize >> 1;
     int xmid = xofs + radius;
     int ymid = yofs + radius;
@@ -184,9 +194,13 @@ void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, f
     xsize -= 6;
     ysize -= 6;
 
-    dc.DrawText(text, xofs + 10, yofs + 3);
-    yofs += 24;
-    ysize -= 24;
+    {
+        wxSize tsz = dc.GetTextExtent(text);
+        int titleH = tsz.GetHeight() + 6;
+        dc.DrawText(text, xofs + 10, yofs + 3);
+        yofs += titleH;
+        ysize -= titleH;
+    }
 
     if (wfallPix > 0)
     {
@@ -236,10 +250,14 @@ void Plot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, 
     Plot(dc, xofs, yofs, xsize, ysize, numElements, data, ymin, ymax, hgrat, ygrat, text);
 
     xofs += 3; // Border and scale to match "plot"
-    yofs += 27;
+    {
+        wxSize tsz = dc.GetTextExtent(text);
+        int titleH = tsz.GetHeight() + 6;
+        yofs += 3 + titleH;
+        ysize -= 6 + titleH;
+    }
     xsize -= 6;
-    ysize -= 30;
- 
+
     dc.SetPen(wxPen(wxColor(160, 255, 160), 2)); // green pen
 
     int xposLast = 0;
@@ -350,7 +368,10 @@ void BasicDrawPane::render(wxDC& dc)
         xofs += extraGap + PrettyText(dc, xofs, 5, 12, freqText, textScale);
 
         wchar_t powerText[16];
-        swprintf_s(powerText, _T("USB S%d"), pRadio->myStatus->Sunit);
+        if (pRadio->myStatus->Sunit > 9)
+            swprintf_s(powerText, _T("USB 9+"));
+        else
+            swprintf_s(powerText, _T("USB S%d"), pRadio->myStatus->Sunit);
         xofs += extraGap + PrettyText(dc, xofs, 5, 6, powerText, textScale);
 
         wchar_t txText[16];
@@ -376,7 +397,9 @@ void BasicDrawPane::render(wxDC& dc)
     float data[10] = { 0.1, 0.4, 0.2, 0.3, 0.8, 0.8, 0.3, 0.5, 0.2, 0.1 };
     int numElements = 10;
 
-    f.SetPointSize(12);
+    int plotFontPt = textFontPt / 2;
+    if (plotFontPt < 8) plotFontPt = 8;
+    f.SetPointSize(plotFontPt);
     dc.SetFont(f);
     dc.SetTextForeground(wxColor(255, 255, 0));
 
@@ -404,10 +427,16 @@ void BasicDrawPane::render(wxDC& dc)
     {
         RFModified = false;
         char rfText[64];
-        sprintf_s(rfText, "RF Power vs Freq, %.3f - %.3f MHz, 5 kHz/, 10 dB/", pRadio->myStatus->TunerFreq - 0.02, pRadio->myStatus->TunerFreq + 0.02);
+        sprintf_s(rfText, "RF Power vs Freq, %.3f - %.3f MHz, 5 kHz/, 6 dB/", pRadio->myStatus->TunerFreq - 0.02, pRadio->myStatus->TunerFreq + 0.02);
         wchar_t plot7Label[64];
         mbstowcs(plot7Label, rfText, 64);
-        Plot(dc, margin, botY, botW, botH, 250, pRadio->myStatus->RFFreqPlot, -5.0, 3.0, 8, 8, plot7Label, 0);
+        // Map S-unit floor/range to log10(MagData) scale: dBm = 20*log10(MagData) - 46.94
+        // With calibration offset: raw_dBm = calibrated_dBm - plotSoffset
+        float dBmFloor = -73.0f + (pRadio->plotSfloor - 9) * 6.0f;
+        float dBmTop   = dBmFloor + pRadio->plotSunits * 6.0f;
+        float ymin = (dBmFloor - pRadio->plotSoffset + 46.94f) / 20.0f;
+        float ymax = (dBmTop   - pRadio->plotSoffset + 46.94f) / 20.0f;
+        Plot(dc, margin, botY, botW, botH, 250, pRadio->myStatus->RFFreqPlot, ymin, ymax, pRadio->plotSunits, 8, plot7Label, 0);
     }
     isPartial = false;
 };
@@ -429,6 +458,69 @@ void BasicDrawPane::render(wxDC& dc)
 
 ///////////////////////////////////////////////////////////////////////////
 
+class LogDialog : public wxDialog
+{
+public:
+    LogDialog(MyFrame* parent, const wxString& lastCall)
+        : wxDialog((wxWindow*)parent, wxID_ANY, _("Log Contact"),
+                   wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
+        , m_parent(parent)
+    {
+        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(new wxStaticText(this, wxID_ANY, _("Remote Callsign:")), 0, wxLEFT | wxTOP | wxRIGHT, 12);
+        m_text = new wxTextCtrl(this, wxID_ANY, lastCall,
+                                wxDefaultPosition, wxSize(200, 32), wxTE_PROCESS_ENTER);
+        m_text->SetMaxLength(16);
+        m_text->SelectAll();
+        sizer->Add(m_text, 0, wxALL, 8);
+        wxButton* ok = new wxButton(this, wxID_ANY, _("LOG"));
+        sizer->Add(ok, 0, wxALL | wxALIGN_CENTER, 8);
+        SetSizer(sizer);
+        Fit();
+        m_text->SetFocus();
+        m_text->Bind(wxEVT_TEXT_ENTER, &LogDialog::OnOK, this);
+        ok->Bind(wxEVT_BUTTON, &LogDialog::OnOK, this);
+        Bind(wxEVT_CLOSE_WINDOW, &LogDialog::OnClose, this);
+    }
+
+private:
+    MyFrame*    m_parent;
+    wxTextCtrl* m_text;
+
+    void DoLog()
+    {
+        wxString callsign = m_text->GetValue().Left(16);
+        m_parent->RemoteCallsign = callsign;
+
+        time_t now = time(nullptr);
+        struct tm gmt;
+        gmtime_s(&gmt, &now);
+
+        std::ofstream f("log.txt", std::ios::app);
+        if (f.is_open())
+        {
+            int sunit = m_parent->myRadio->myStatus->Sunit;
+            char sReport[8];
+            if (sunit > 9)
+                sprintf_s(sReport, "S9+");
+            else
+                sprintf_s(sReport, "S%d", sunit);
+            char buf[128];
+            sprintf_s(buf, "%04d-%02d-%02d,%02d:%02d:%02d UTC,%s,%.4f MHz,%s\n",
+                gmt.tm_year + 1900, gmt.tm_mon + 1, gmt.tm_mday,
+                gmt.tm_hour, gmt.tm_min, gmt.tm_sec,
+                callsign.ToStdString().c_str(),
+                m_parent->myRadio->LOfreq,
+                sReport);
+            f << buf;
+        }
+        Destroy();
+    }
+
+    void OnOK(wxCommandEvent&) { DoLog(); }
+    void OnClose(wxCloseEvent&) { Destroy(); }
+};
+
 MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const wxPoint& pos, const wxSize& size, long style) : wxFrame(parent, id, title, pos, size, style)
 {
 
@@ -449,6 +541,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->AppendSeparator();
     radioMenu->Append(ID_SWEEP_TUNER,   _("Sweep &Tuner"));
     radioMenu->Append(ID_SWEEP_ANTENNA, _("Sweep &Antenna"));
+    radioMenu->AppendSeparator();
+    radioMenu->Append(ID_PLOT_SETTINGS, _("&Plot Settings..."));
     menuBar->Append(radioMenu, _("&Radio"));
     wxMenu* audioMenu = new wxMenu();
     audioMenu->Append(ID_AUDIO_MAX_MIC_GAIN,    _("Max Mic Gain (dB)"));
@@ -465,6 +559,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnSweepAntenna, this, ID_SWEEP_ANTENNA);
     Bind(wxEVT_MENU, &MyFrame::OnAudioMaxMicGain,   this, ID_AUDIO_MAX_MIC_GAIN);
     Bind(wxEVT_MENU, &MyFrame::OnAudioCESSBSetpoint, this, ID_AUDIO_CESSB_SETPOINT);
+    Bind(wxEVT_MENU, &MyFrame::OnPlotSettings,       this, ID_PLOT_SETTINGS);
 
     myRadio = new CRadio();//Do this after frame exists
 
@@ -483,7 +578,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     bSizer1->Add(bSizer2, 1, wxEXPAND, 5);
 
     wxFlexGridSizer* gSizer1;
-    gSizer1 = new wxFlexGridSizer(10, 1, 5, 5);
+    gSizer1 = new wxFlexGridSizer(0, 1, 2, 2);
     gSizer1->SetFlexibleDirection(wxBOTH);
     gSizer1->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
 
@@ -498,31 +593,31 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button1->SetFont(bf);
     m_button1->SetBackgroundColour(wxColor(32, 32, 32));
     m_button1->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button1, 0, wxALL, 5);
+    gSizer1->Add(m_button1, 0, wxALL, 2);
 
     m_button2 = new wxButton(this, wxID_ANY, _("DISABLE 24V "), wxDefaultPosition, wxSize(180, 40), 0);
     m_button2->SetFont(bf);
     m_button2->SetBackgroundColour(wxColor(32, 32, 32));
     m_button2->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button2, 0, wxALL, 5);
+    gSizer1->Add(m_button2, 0, wxALL, 2);
 
     m_button3 = new wxButton(this, wxID_ANY, _(" ANT TUNE  "), wxDefaultPosition, wxSize(180, 40), 0);
     m_button3->SetFont(bf);
     m_button3->SetBackgroundColour(wxColor(32, 32, 32));
     m_button3->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button3, 0, wxALL, 5);
+    gSizer1->Add(m_button3, 0, wxALL, 2);
 
     m_button4 = new wxButton(this, wxID_ANY, _(" TRANSMIT  "), wxDefaultPosition, wxSize(180, 40), 0);
     m_button4->SetFont(bf);
     m_button4->SetBackgroundColour(wxColor(32, 32, 32));
     m_button4->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button4, 0, wxALL, 5);
+    gSizer1->Add(m_button4, 0, wxALL, 2);
 
     m_button5 = new wxButton(this, wxID_ANY, _(" RECEIVE  "), wxDefaultPosition, wxSize(180, 40), 0);
     m_button5->SetFont(bf);
     m_button5->SetBackgroundColour(wxColor(32, 32, 32));
     m_button5->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button5, 0, wxALL, 5);
+    gSizer1->Add(m_button5, 0, wxALL, 2);
 
     //wxStaticText* staticText1 = new wxStaticText(this, wxID_ANY, _("FREQUENCY"), wxDefaultPosition, wxSize(180, 40), 0);
     //staticText1->SetFont(bf);
@@ -556,7 +651,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
 
 
 
-    gSizer1->Add(gSizer2, 0, wxALL, 5);
+    gSizer1->Add(gSizer2, 0, wxALL, 2);
 
     wxFlexGridSizer* gSizer3;
     gSizer3 = new wxFlexGridSizer(1, 3, 0, 0);
@@ -586,7 +681,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
 
  //   m_slider1 = new wxSlider(this, wxID_ANY, 50, 0, 100, wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
  //   gSizer1->Add(m_slider1, 0, wxALL, 5);
-    gSizer1->Add(gSizer3, 0, wxALL, 5);
+    gSizer1->Add(gSizer3, 0, wxALL, 2);
 
     m_button10 = new wxButton(this, wxID_ANY, _("Hotkeys = N"), wxDefaultPosition, wxSize(180, 40), 0);
     m_button10->SetFont(bf);
@@ -598,6 +693,14 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_textDebug = new wxTextCtrl(this, wxID_ANY, _("DEBUG"), wxDefaultPosition, wxSize(180, 40), 0);
     m_textDebug->SetFont(bf);
     gSizer1->Add(m_textDebug, 0, wxALL, 2);
+
+    m_button11 = new wxButton(this, wxID_ANY, _("    LOG    "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button11->SetFont(bf);
+    m_button11->SetBackgroundColour(wxColor(32, 64, 32));
+    m_button11->SetForegroundColour(wxColor(128, 255, 128));
+    gSizer1->Add(m_button11, 0, wxALL, 2);
+
+    RemoteCallsign = wxEmptyString;
 
     bSizer1->Add(gSizer1, 0, wxALIGN_TOP, 5);
 
@@ -621,6 +724,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button8->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B8Click), NULL, this);
     m_button9->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B9Click), NULL, this);
     m_button10->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B10Click), NULL, this);
+    m_button11->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BLogClick), NULL, this);
 
     SPtoTX = false;
     Bind(wxEVT_CHAR_HOOK, &MyFrame::OnCharHook, this);
@@ -657,7 +761,7 @@ void MyFrame::OnFileLoad(wxCommandEvent& event)
         _("JSON files (*.json)|*.json"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() == wxID_CANCEL) return;
     if (myRadio->LoadSettings(dlg.GetPath().mb_str()))
-        m_textCtrl1->SetValue(wxString::Format("%.5f", myRadio->LOfreq));
+        m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
 }
 
 void MyFrame::OnSetComPort(wxCommandEvent& event)
@@ -717,6 +821,40 @@ void MyFrame::OnAudioCESSBSetpoint(wxCommandEvent& event)
         myRadio->agcTarget = (float)pow(10.0, dB / 20.0);
 }
 
+void MyFrame::OnPlotSettings(wxCommandEvent& event)
+{
+    long val;
+
+    val = wxGetNumberFromUser(
+        _("Bottom S-unit of spectrum display (0 = S0, 9 = S9):"),
+        _("S-unit floor (0-9):"),
+        _("Plot Settings - S-unit Floor"),
+        myRadio->plotSfloor, 0, 9, this);
+    if (val < 0) return;
+    myRadio->plotSfloor = (int)val;
+
+    val = wxGetNumberFromUser(
+        _("Number of S-unit divisions to show (8-24):"),
+        _("S-units shown (8-24):"),
+        _("Plot Settings - S-units Shown"),
+        myRadio->plotSunits, 8, 24, this);
+    if (val < 0) return;
+    myRadio->plotSunits = (int)val;
+
+    wxString input = wxGetTextFromUser(
+        _("Calibration offset in dB (positive = reads higher, -10.0 to +10.0):"),
+        _("Plot Settings - S-unit Offset (dB)"),
+        wxString::Format("%.1f", myRadio->plotSoffset), this);
+    if (input.IsEmpty()) return;
+    double offset;
+    if (input.ToDouble(&offset))
+    {
+        if (offset < -10.0) offset = -10.0;
+        if (offset >  10.0) offset =  10.0;
+        myRadio->plotSoffset = (float)offset;
+    }
+}
+
 void MyFrame::OnPaint(wxPaintEvent& event)
 {
     wxPaintDC dc(this);
@@ -742,6 +880,13 @@ void MyFrame::OnPaint(wxPaintEvent& event)
 void MyFrame::OnTimer(wxTimerEvent& event)
 {
  //   return;
+    time_t now = time(nullptr);
+    struct tm gmt;
+    gmtime_s(&gmt, &now);
+    sprintf_s(myRadio->myStatus->GMTTime, "%02d:%02d:%02d UTC",
+              gmt.tm_hour, gmt.tm_min, gmt.tm_sec);
+    myRadio->myStatus->UpdateText = true;
+
     wchar_t label[16];// = _T("RF Power vs Freq, 14-14.35 MHz, 50 kHz/, 10 dB/");
     mbstowcs(label, myRadio->dbgText, 16);
     m_textDebug->SetLabelText(label);
@@ -799,15 +944,17 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
 
 void MyFrame::B7Click(wxCommandEvent& event) // Step down
 {
-    myRadio->LOfreq -= myRadio->stepSize / 1e6f;
-    m_textCtrl1->SetValue(wxString::Format("%.5f", myRadio->LOfreq));
+    myRadio->LOfreq -= myRadio->stepSize / 1.0e6;
+    myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
+    m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
 }
 
 void MyFrame::B8Click(wxCommandEvent& event) // Step up
 {
-    myRadio->LOfreq += myRadio->stepSize / 1e6f;
-    m_textCtrl1->SetValue(wxString::Format("%.5f", myRadio->LOfreq));
+    myRadio->LOfreq += myRadio->stepSize / 1.0e6;
+    myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
+    m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
 }
 
@@ -816,13 +963,19 @@ void MyFrame::B9Click(wxCommandEvent& event) // Hz (update step size)
     wxString value = m_textCtrl2->GetValue();
     double step;
     if (value.ToDouble(&step))
-        myRadio->stepSize = (float)step;
+        myRadio->stepSize = step;
 }
 
 void MyFrame::B10Click(wxCommandEvent& event)
 {
     SPtoTX = !SPtoTX;
     m_button10->SetLabelText(SPtoTX ? _("Hotkeys = Y") : _("Hotkeys = N"));
+}
+
+void MyFrame::BLogClick(wxCommandEvent& event)
+{
+    LogDialog* dlg = new LogDialog(this, RemoteCallsign);
+    dlg->Show(true);
 }
 
 void MyFrame::OnCharHook(wxKeyEvent& event)
@@ -835,6 +988,7 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
         if (key == WXK_RIGHT) { wxCommandEvent dummy; B8Click(dummy); return; }
         if (key == WXK_LEFT)  { wxCommandEvent dummy; B7Click(dummy); return; }
     }
+    if (event.GetKeyCode() == 'L') { wxCommandEvent dummy; BLogClick(dummy); return; }
     event.Skip();
 }
 

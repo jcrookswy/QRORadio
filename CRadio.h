@@ -77,7 +77,7 @@ public:
 
 	void ProcessIQ(char* data); // Change 4, 6-bit values into a float
 	void DoRXDSP(bool bypassALC); // Change 4, 6-bit values into a float
-	int SetFreq(float freqMHz);
+	int SetFreq(double freqMHz);
 	void UpdateADCs(char* readData);
 
 	std::thread myAThread;
@@ -104,12 +104,23 @@ public:
 	Ipp32f*  cessbI;    // I channel split for resampler, 1280 samples
 	Ipp32f*  cessbQ;    // Q channel split for resampler, 1280 samples
 
-	float LOfreq;
-	float stepSize;
+	double LOfreq;
+	double stepSize;
 	float micGain;
 	float agcMaxGain;
 	float agcTarget;
 	bool NewLOFreq;
+
+	float RXChannelPower;  // 5-second peak channel power, center to +3 kHz
+
+	float rxPowerPeaks[32];   // peak of each 16-reading block (~3 s of history)
+	int   rxPowerPeakIdx;     // next slot to write in rxPowerPeaks
+	int   rxPowerBlockPos;    // readings accumulated in current block (0-15)
+	float rxPowerBlockMax;    // running max within current block
+
+	int   plotSfloor;   // S-unit at bottom of spectrum plot (0-9)
+	int   plotSunits;   // number of S-unit divisions shown (8-24)
+	float plotSoffset;  // calibration trim in dB (-10 to +10)
 
 	Ipp32f* MagData ;
 	Ipp32f* MagMinAccumData;
