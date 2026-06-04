@@ -173,6 +173,7 @@ public:
 
     CRadio*   myRadio;
     bool      SPtoTX;
+    bool      antTuneRun;
     wxString  RemoteCallsign;
     wxDECLARE_EVENT_TABLE();
 

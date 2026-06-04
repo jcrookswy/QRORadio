@@ -1556,6 +1556,8 @@ int CRadio::SetFreq(double freqMHz)
 {
     char writeData[8];
     DWORD bytesWritten = 0;
+    if (freqMHz < 14.150) freqMHz = 14.150;
+    if (freqMHz > 14.347) freqMHz = 14.347;
     LOfreq = freqMHz;
     m_iFreq = (int)round(LOfreq * 1000000.0);
     writeData[0] = 'f';

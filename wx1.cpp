@@ -737,6 +737,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button11->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BLogClick), NULL, this);
 
     SPtoTX = false;
+    antTuneRun = false;
+    m_button4->Enable(false);
     Bind(wxEVT_CHAR_HOOK, &MyFrame::OnCharHook, this);
 //    m_button1->Enable();
 //    m_panel1->Connect(wxEVT_PAINT, wxPaintEventHandler(BasicDrawPane::paintEvent), NULL, this);
@@ -895,10 +897,28 @@ void MyFrame::OnTimer(wxTimerEvent& event)
     gmtime_s(&gmt, &now);
     sprintf_s(myRadio->myStatus->GMTTime, "%02d:%02d:%02d UTC",
               gmt.tm_hour, gmt.tm_min, gmt.tm_sec);
+    static int lastSec = -1;
+    if (gmt.tm_sec != lastSec)
+    {
+        lastSec = gmt.tm_sec;
+        myRadio->myStatus->UpdateText = true;
+    }
 
     wchar_t label[16];// = _T("RF Power vs Freq, 14-14.35 MHz, 50 kHz/, 10 dB/");
     mbstowcs(label, myRadio->dbgText, 16);
     m_textDebug->SetLabelText(label);
+
+    if (!antTuneRun)
+    {
+        static int prevMode = -1;
+        int curMode = myRadio->myStatus->mode;
+        if (prevMode == VNA_MODE && curMode == RX_MODE)
+        {
+            antTuneRun = true;
+            m_button4->Enable(true);
+        }
+        prevMode = curMode;
+    }
 
     myRadio->UpdatePlot();
     m_panel1->isPartial = true;
@@ -913,7 +933,11 @@ void MyFrame::B1Click(wxCommandEvent& event) // CONNECT
     int retval = myRadio->Connect();
 
     if (retval)
+    {
         m_button1->SetLabelText(_(" CONNECTED "));
+        if (myRadio->LoadSettings("settings.json"))
+            m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
+    }
 
     m_panel1->Refresh(false);
     m_timer.Start(125);
@@ -947,7 +971,10 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     wxString value = m_textCtrl1->GetValue();
     double freq;
     value.ToDouble(&freq);
+    if (freq < 14.150) freq = 14.150;
+    if (freq > 14.347) freq = 14.347;
     myRadio->LOfreq = freq;
+    m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
 }
@@ -956,6 +983,7 @@ void MyFrame::B7Click(wxCommandEvent& event) // Step down
 {
     myRadio->LOfreq -= myRadio->stepSize / 1.0e6;
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
+    if (myRadio->LOfreq < 14.150) myRadio->LOfreq = 14.150;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
@@ -965,6 +993,7 @@ void MyFrame::B8Click(wxCommandEvent& event) // Step up
 {
     myRadio->LOfreq += myRadio->stepSize / 1.0e6;
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
+    if (myRadio->LOfreq > 14.347) myRadio->LOfreq = 14.347;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
@@ -995,7 +1024,7 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
     if (SPtoTX)
     {
         int key = event.GetKeyCode();
-        if (key == 'T') { myRadio->myStatus->mode = TX_MODE; return; }
+        if (key == 'T' && antTuneRun) { myRadio->myStatus->mode = TX_MODE; return; }
         if (key == 'R') { myRadio->myStatus->mode = RX_MODE; return; }
         if (key == WXK_RIGHT) { wxCommandEvent dummy; B8Click(dummy); return; }
         if (key == WXK_LEFT)  { wxCommandEvent dummy; B7Click(dummy); return; }
