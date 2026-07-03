@@ -146,6 +146,8 @@ public:
 	Ipp32f* RaisedCosUpDown;// = new Ipp32f[2048];
 	void BuildGainRamp(float* ramp, float GainPA, float GainAB, float GainBC);
 
+	void QuickSync();
+
 	void InitCESSB();
 	void ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut);
 
@@ -184,6 +186,7 @@ public:
 	int audioOutWrPtr;
 	int audioOutRdPtr;
 	char dbgText[16];
+	char myCallsign[16];
 	bool audioOutStarted;
 
 

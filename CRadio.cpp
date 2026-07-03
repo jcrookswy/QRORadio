@@ -155,6 +155,7 @@ bool CRadio::SaveSettings(const char* path)
     fprintf(f, "  \"comPort\": %d,\n", comPort);
     fprintf(f, "  \"LOfreq\": %lf,\n", LOfreq);
     fprintf(f, "  \"RelaySettings\": %d,\n", RelaySettings);
+    fprintf(f, "  \"myCallsign\": \"%s\",\n", myCallsign);
 
     const char*  names[]  = { "SweptOpen", "SweptShort", "SweptLoad", "SweptIQMu" };
     Ipp32fc*     arrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad, myVNACal->SweptIQMu };
@@ -184,10 +185,12 @@ bool CRadio::LoadSettings(const char* path)
     char line[256];
     while (fgets(line, sizeof(line), f))
     {
-        int ival; float fval, re, im; double dval = 0.0;
+        int ival; float fval, re, im; double dval = 0.0; char cval[16];
         if      (sscanf_s(line, " \"comPort\": %d",       &ival) == 1) comPort       = ival;
         else if (sscanf_s(line, " \"LOfreq\": %lf",       &dval) == 1) LOfreq        = dval;
         else if (sscanf_s(line, " \"RelaySettings\": %d", &ival) == 1) RelaySettings = ival;
+        else if (sscanf_s(line, " \"myCallsign\": \"%[^\"]\"", cval, (unsigned)sizeof(cval)) == 1)
+            strncpy_s(myCallsign, sizeof(myCallsign), cval, _TRUNCATE);
         else if (strstr(line, "\"SweptOpen\""))        { calSection = 0; calIdx = 0; }
         else if (strstr(line, "\"SweptShort\""))       { calSection = 1; calIdx = 0; }
         else if (strstr(line, "\"SweptLoad\""))        { calSection = 2; calIdx = 0; }
@@ -218,6 +221,7 @@ CRadio::CRadio()
     plotSfloor  = 2;
     plotSunits  = 11;
     plotSoffset = 0.0f;
+    memset(myCallsign, 0, sizeof(myCallsign));
 
     audioInBuf = new Ipp32f[16384];
     audioOutBuf = new Ipp32f[16384];
@@ -1288,6 +1292,11 @@ void CRadio::AntTuneDataLoop()
         SweepAntTune();
         return;
     }
+    if (myStatus->calMode == 6)
+    {
+        QuickSync();
+        return;
+    }
 
     DWORD WriteData4[16];
     char writeData[64];
@@ -1313,79 +1322,120 @@ void CRadio::AntTuneDataLoop()
     writeData[2] = 0x20 + 0x3B; // FWD power
     WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     Sleep(16);
-    double thisFreq;
     float minRMAG = 1.0;
 
-    for (int ifrq = 0; ifrq < 104; ifrq++)//36 @ bypass, 32@14.25 GHz across settings, 36@best setting
+    // Phase 1: untuned sweep 14.15-14.35 MHz (21 points), stored at indices 15-35
+    for (int jj = 0; jj < 21; jj++)
     {
-        int calIndex = ifrq;
-        if (ifrq > 35) calIndex = 25;
-        if (ifrq < 36) thisFreq = 14.0 + ifrq * 0.01;
-        else if (ifrq < 68) thisFreq = 14.25;
-        else thisFreq = 14.0 + (ifrq - 68) * 0.01;
-        SetFreq(thisFreq); //10 kHz steps
+        int storeIdx = jj + 15;
+        SetFreq(14.15 + jj * 0.01);
 
-        writeData[0] = 'w'; // idle vna mode
-        WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+        writeData[0] = 'w';
+        WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
         Sleep(16);
         ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
         if (readData[0] != 'R')
             int g = 0;
 
-        if ((ifrq > 36) && (ifrq < 69)) // All indices where we change relay states
-        {
-            RelaySettings = (ifrq == 68) ? bestRelaySetting : ifrq - 36;
-			writeData[0] = 'c';
-			writeData[1] = 0x20 + RelaySettings;
-			writeData[2] = 0x20 + 0x3B; // FWD power
-			WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
-			Sleep(16);
-        }
-
         Ipp32fc S11 = GetS11(H2Window);
-        S11 = GetCorrectedS11(calIndex, S11);
-
+        S11 = GetCorrectedS11(storeIdx, S11);
         float Rmag = sqrt(S11.re * S11.re + S11.im * S11.im);
 
-        int ifrqx2 = (ifrq % 36) * 2;
-        if (ifrq < 36)
+        myStatus->SmithChartUntuned[storeIdx * 2]     = S11.re;
+        myStatus->SmithChartUntuned[storeIdx * 2 + 1] = S11.im;
+        myStatus->SWRUntuned[storeIdx]                 = (1.0f + Rmag) / (1.0f - Rmag);
+        myVNACal->SweptIQMu[storeIdx]                  = m_lastIQMu;
+        myStatus->UpdateVSWR = true;
+    }
+    // Backfill 14.00-14.14 (indices 0-14) with the 14.15 measurement
+    for (int k = 0; k < 15; k++)
+    {
+        myStatus->SmithChartUntuned[k * 2]     = myStatus->SmithChartUntuned[30];
+        myStatus->SmithChartUntuned[k * 2 + 1] = myStatus->SmithChartUntuned[31];
+        myStatus->SWRUntuned[k]                 = myStatus->SWRUntuned[15];
+        myVNACal->SweptIQMu[k]                  = myVNACal->SweptIQMu[15];
+    }
+    myStatus->UpdateVSWR = true;
+
+    // Calibration index for lastLO within the 36-point OSL table (14.0-14.35 MHz)
+    int tuneCalIdx = (int)round((lastLO - 14.0) / 0.01);
+    if (tuneCalIdx < 0)  tuneCalIdx = 0;
+    if (tuneCalIdx > 35) tuneCalIdx = 35;
+    // Store index for lastLO within the tuned-sweep results (14.15-14.35 MHz, indices 15-35)
+    int tuneStoreIdx = (int)round((lastLO - 14.15) / 0.01) + 15;
+    if (tuneStoreIdx < 15) tuneStoreIdx = 15;
+    if (tuneStoreIdx > 35) tuneStoreIdx = 35;
+
+    if (myStatus->calMode == 3)
+    {
+        // Phase 2: relay search at current operating frequency across all 32 relay settings
+        SetFreq(lastLO);
+        for (int jj = 0; jj < 32; jj++)
         {
-            myStatus->SmithChartUntuned[ifrqx2] = S11.re;
-            myStatus->SmithChartUntuned[ifrqx2 + 1] = S11.im;
-            myStatus->SWRUntuned[ifrq] = (1.0 + Rmag) / (1.0 - Rmag);
-            myVNACal->SweptIQMu[ifrq] = m_lastIQMu;
+            writeData[0] = 'c';
+            writeData[1] = 0x20 + jj;
+            writeData[2] = 0x20 + 0x3B;
+            WriteFile(hSerial, writeData, 3, &bytesWritten, NULL);
+            Sleep(16);
+
+            writeData[0] = 'w';
+            WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
+            Sleep(16);
+            ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
+            if (readData[0] != 'R')
+                int g = 0;
+
+            Ipp32fc S11 = GetS11(H2Window);
+            S11 = GetCorrectedS11(tuneCalIdx, S11);
+            float Rmag = sqrt(S11.re * S11.re + S11.im * S11.im);
+            if (Rmag < minRMAG) { minRMAG = Rmag; bestRelaySetting = jj; }
+            myStatus->UpdateVSWR = true;
         }
 
-        else if(ifrq >= 68)
+        // Phase 3: tuned sweep 14.15-14.35 MHz at best relay setting, stored at indices 15-35
+        RelaySettings = bestRelaySetting;
+        writeData[0] = 'c';
+        writeData[1] = 0x20 + RelaySettings;
+        writeData[2] = 0x20 + 0x3B;
+        WriteFile(hSerial, writeData, 3, &bytesWritten, NULL);
+        Sleep(16);
+
+        for (int jj = 0; jj < 21; jj++)
         {
-			myStatus->SmithChartTuned[ifrqx2] = S11.re;
-			myStatus->SmithChartTuned[ifrqx2 + 1] = S11.im;
-            myStatus->SWRTuned[ifrq-68] = (1.0 + Rmag) / (1.0 - Rmag);
+            int storeIdx = jj + 15;
+            SetFreq(14.15 + jj * 0.01);
+
+            writeData[0] = 'w';
+            WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
+            Sleep(16);
+            ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
+            if (readData[0] != 'R')
+                int g = 0;
+
+            Ipp32fc S11 = GetS11(H2Window);
+            S11 = GetCorrectedS11(25, S11);
+            float Rmag = sqrt(S11.re * S11.re + S11.im * S11.im);
+
+            myStatus->SmithChartTuned[storeIdx * 2]     = S11.re;
+            myStatus->SmithChartTuned[storeIdx * 2 + 1] = S11.im;
+            myStatus->SWRTuned[storeIdx]                 = (1.0f + Rmag) / (1.0f - Rmag);
+            myStatus->UpdateVSWR = true;
         }
-        else
+        // Backfill 14.00-14.14 (indices 0-14) with the 14.15 measurement
+        for (int k = 0; k < 15; k++)
         {
-            if (Rmag < minRMAG)
-            {
-                minRMAG = Rmag;
-                bestRelaySetting = ifrq - 36;
-            }
-             
+            myStatus->SmithChartTuned[k * 2]     = myStatus->SmithChartTuned[30];
+            myStatus->SmithChartTuned[k * 2 + 1] = myStatus->SmithChartTuned[31];
+            myStatus->SWRTuned[k]                 = myStatus->SWRTuned[15];
         }
         myStatus->UpdateVSWR = true;
-        if ((myStatus->calMode == 5) && (ifrq == 35)) break;
-	}
-	if (myStatus->calMode == 3)
-	{
-		RelaySettings = bestRelaySetting;
-        sprintf_s(dbgText, "TUNE %d %.2f", bestRelaySetting, myStatus->SWRTuned[25]);
-        //Cleanup
-		myStatus->UpdateVSWR = true;
-	}
-	SetFreq(lastLO);
 
+        sprintf_s(dbgText, "TUNE %d %.2f", bestRelaySetting, myStatus->SWRTuned[tuneStoreIdx]);
+    }
+
+    SetFreq(lastLO);
     SetRXBits();
-
-	Sleep(16);
+    Sleep(16);
 
     writeData[0] = 'r';
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
@@ -1458,6 +1508,65 @@ void CRadio::SweepAntTune()
 	myStatus->mode = 1;
 
 }
+
+void CRadio::QuickSync()
+{
+    DWORD WriteData4[16];
+    char writeData[64];
+    char readData[64];
+    DWORD bytesWritten = 0;
+    DWORD bytesToWrite = 4;
+    //    int RelaySettings = 31; // 31 is bypass
+    Ipp32f H2Window[160];
+    for (int i = 0; i < 160; i++)
+        H2Window[i] = 0.5 - 0.5 * cos(IPP_2PI * i / 160);
+
+    IQWriteAddr = 0;
+
+    writeData[0] = 'w'; // prep vna
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+    Sleep(16);
+
+    writeData[0] = 'c';
+    writeData[1] = 0x20; // Bypass
+    writeData[2] = 0x20 + 0x3B; // FWD power
+    WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+    Sleep(16);
+    double thisFreq;
+    float minRMAG = 1.0;
+
+    {
+        writeData[0] = 'w'; // idle vna mode
+        WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+        Sleep(16);
+        ReadFile(hSerial, readData, 4, &bytesWritten, NULL);
+        if (readData[0] != 'R')
+            int g = 0;
+
+        writeData[1] = 0x20 + RelaySettings;
+        writeData[2] = 0x20 + 0x3B; // FWD power
+        WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+        Sleep(16);
+
+        Ipp32fc S11 = GetS11(H2Window);
+        S11 = GetCorrectedS11(25, S11);
+
+        float Rmag = sqrt(S11.re * S11.re + S11.im * S11.im);
+
+     }
+
+    SetRXBits();
+
+    Sleep(16);
+
+    //writeData[0] = 'i';
+    //WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
+    writeData[0] = 'r';
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Put device in RX mode
+    myStatus->mode = 1;
+
+}
+
 
 
 int CRadio::DataThread()

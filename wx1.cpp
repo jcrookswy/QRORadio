@@ -4,6 +4,7 @@
 #include <cmath>
 #include <ctime>
 #include <fstream>
+#include <string>
 //#include "MyProjectBase.h"
 #include "frame1.h"
 #include "CRadio.h"
@@ -134,7 +135,7 @@ void SmithPlot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElemen
     }
 
     dc.SetPen(wxPen(wxColor(255, 255, 128), 2)); // yellow pen
-    for (int i = 0; i < 36; i++)
+    for (int i = 0; i < numElements; i++)
     {
         x1 = xmid + radius * data[i * 2];
         y1 = ymid - radius * data[i * 2 + 1];
@@ -164,7 +165,7 @@ void SmithPlot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numEleme
     int lastx = 0, lasty = 0, x1 = 0, y1 = 0;
 
     dc.SetPen(wxPen(wxColor(160, 255, 160), 2)); // green pen
-    for (int i = 0; i < 36; i++)
+    for (int i = 0; i < numElements; i++)
     {
         x1 = xmid + radius * data2[i * 2];
         y1 = ymid - radius * data2[i * 2 + 1];
@@ -177,9 +178,29 @@ void SmithPlot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numEleme
 
 }
 
+static void SpecLevelToRGB(float level, unsigned char& r, unsigned char& g, unsigned char& b)
+{
+    if (level <= 0.0f) { r = g = b = 0; return; }
+    if (level >= 1.0f) { r = g = b = 255; return; }
+    float t;
+    if (level < 0.25f) {
+        t = level * 4.0f;
+        r = 0; g = 0; b = (unsigned char)(t * 255.0f);
+    } else if (level < 0.5f) {
+        t = (level - 0.25f) * 4.0f;
+        r = 0; g = (unsigned char)(t * 255.0f); b = (unsigned char)((1.0f - t) * 255.0f);
+    } else if (level < 0.75f) {
+        t = (level - 0.5f) * 4.0f;
+        r = (unsigned char)(t * 255.0f); g = 255; b = 0;
+    } else {
+        t = (level - 0.75f) * 4.0f;
+        r = 255; g = 255; b = (unsigned char)(t * 255.0f);
+    }
+}
+
 //Plot widget (float)
 //inputs: array size, array pointer, x offset, y offset, x size, y size, y min, y max, horz grat count, vert grat count
-void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, float* data, float ymin, float ymax, int hgrat, int ygrat, wchar_t* text, int wfallPix = 0, int shadeL = -1, int shadeR = -1)
+void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, float* data, float ymin, float ymax, int hgrat, int ygrat, wchar_t* text, int wfallPix = 0, int shadeL = -1, int shadeR = -1, unsigned char* wfPixels = nullptr, int wfBins = 0, int wfRows = 0)
 {
     // draw a rectangle
     dc.SetBrush(wxBrush(wxColor(48, 48, 48))); //
@@ -204,10 +225,22 @@ void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, f
 
     if (wfallPix > 0)
     {
-        dc.SetPen(wxPen(wxColor(32, 32, 32), 0));
-        dc.SetBrush(wxBrush(wxColor(0, 32, 192))); //
-        dc.DrawRectangle(xofs, yofs + ysize - wfallPix + 2, xsize, wfallPix - 4); // Draw outer perimeter
-        ysize -= wfallPix; // Leave room for waterfall if specified
+        int wfY = yofs + ysize - wfallPix + 2;
+        int wfH = wfallPix - 4;
+        if (wfPixels && wfBins > 0 && wfRows > 0 && wfH > 0)
+        {
+            wxImage img(wfBins, wfRows, wfPixels, true);
+            wxBitmap bmp(img);
+            wxMemoryDC mdc(bmp);
+            dc.StretchBlit(xofs, wfY, xsize, wfH, &mdc, 0, 0, wfBins, wfRows);
+        }
+        else
+        {
+            dc.SetPen(wxPen(wxColor(32, 32, 32), 0));
+            dc.SetBrush(wxBrush(wxColor(0, 32, 192)));
+            dc.DrawRectangle(xofs, wfY, xsize, wfH);
+        }
+        ysize -= wfallPix;
     }
 
 
@@ -415,11 +448,11 @@ void BasicDrawPane::render(wxDC& dc)
     if (VSWRModified)
     {
         VSWRModified = false;
-        wchar_t plot1Label[36] = _T("VSWR 14-14.35 MHz 0.5/");
-        Plot2(dc, x3, midY, plotW, midH, 36, pRadio->myStatus->SWRUntuned, 1.0, 3.0, 4, 7, plot1Label, pRadio->myStatus->SWRTuned);
+        wchar_t plot1Label[36] = _T("VSWR 14.15-14.35 MHz 0.5/");
+        Plot2(dc, x3, midY, plotW, midH, 21, &pRadio->myStatus->SWRUntuned[15], 1.0, 3.0, 4, 7, plot1Label, &pRadio->myStatus->SWRTuned[15]);
 
         wchar_t plot8Label[24] = _T("Antenna Impedance");
-        SmithPlot2(dc, x4, midY, smithW, midH, 36, pRadio->myStatus->SmithChartUntuned, pRadio->myStatus->SmithChartTuned, plot8Label);
+        SmithPlot2(dc, x4, midY, smithW, midH, 21, &pRadio->myStatus->SmithChartUntuned[30], &pRadio->myStatus->SmithChartTuned[30], plot8Label);
     }
 
     if (audioModified)
@@ -445,8 +478,27 @@ void BasicDrawPane::render(wxDC& dc)
         float dBmTop   = dBmFloor + pRadio->plotSunits * 6.0f;
         float ymin = (dBmFloor - pRadio->plotSoffset + 46.94f) / 20.0f;
         float ymax = (dBmTop   - pRadio->plotSoffset + 46.94f) / 20.0f;
+
+        // Waterfall: find per-row min, shift history down, write new top row
+        float* spec = pRadio->myStatus->RFFreqPlot;
+        float wfMin = spec[0];
+        for (int i = 1; i < WF_BINS; i++)
+            if (spec[i] < wfMin) wfMin = spec[i];
+        const float wfRange = 1.8f; // 36 dB in log10(magnitude) units
+        memmove(wfPixels + WF_BINS * 3, wfPixels, (size_t)WF_BINS * 3 * (WF_ROWS - 1));
+        unsigned char* row0 = wfPixels;
+        const float wfHalf = (WF_BINS - 1) * 0.5f;
+        for (int i = 0; i < WF_BINS; i++)
+        {
+            float t = 1.0f - fabsf(i - wfHalf) / wfHalf; // 0 at edges, 1 at center
+            float offset = 0.25f + t * 0.25f;             // 5 dB at edges, 10 dB at center
+            float level = (spec[i] - wfMin - offset) / wfRange;
+            if (level < 0.0f) level = 0.0f;
+            SpecLevelToRGB(level, row0[i * 3], row0[i * 3 + 1], row0[i * 3 + 2]);
+        }
+
         // shadeL=125 (DC center), shadeR=141 (center+3 kHz = 16 bins × 187.5 Hz)
-        Plot(dc, margin, botY, botW, botH, 250, pRadio->myStatus->RFFreqPlot, ymin, ymax, pRadio->plotSunits, 8, plot7Label, 0, 125, 141);
+        Plot(dc, margin, botY, botW, botH, 250, spec, ymin, ymax, pRadio->plotSunits, 8, plot7Label, WF_ROWS, 125, 141, wfPixels, WF_BINS, WF_ROWS);
     }
     isPartial = false;
 };
@@ -476,54 +528,142 @@ public:
                    wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
         , m_parent(parent)
     {
+        time_t now = time(nullptr);
+        struct tm gmt;
+        gmtime_s(&gmt, &now);
+
+        char dateBuf[16], timeBuf[16], freqBuf[16], rstRcvdBuf[8];
+        sprintf_s(dateBuf, "%04d%02d%02d", gmt.tm_year + 1900, gmt.tm_mon + 1, gmt.tm_mday);
+        sprintf_s(timeBuf, "%02d%02d%02d", gmt.tm_hour, gmt.tm_min, gmt.tm_sec);
+        sprintf_s(freqBuf, "%.4f", parent->myRadio->LOfreq);
+
+        int sunit = parent->myRadio->myStatus->Sunit;
+        if (sunit > 9)       sprintf_s(rstRcvdBuf, "59+");
+        else if (sunit >= 1) sprintf_s(rstRcvdBuf, "5%d", sunit);
+        else                 sprintf_s(rstRcvdBuf, "59");
+
+        wxFlexGridSizer* grid = new wxFlexGridSizer(0, 2, 5, 8);
+        grid->AddGrowableCol(1);
+
+        auto AddRow = [&](const wxString& lbl, wxTextCtrl*& ctrl,
+                          const wxString& val, int maxLen, long style = 0) {
+            grid->Add(new wxStaticText(this, wxID_ANY, lbl),
+                      0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            ctrl = new wxTextCtrl(this, wxID_ANY, val,
+                                  wxDefaultPosition, wxSize(220, -1), style);
+            ctrl->SetMaxLength(maxLen);
+            grid->Add(ctrl, 1, wxEXPAND);
+        };
+
+        AddRow(_("Their Call:"),     m_call,    lastCall,                    16, wxTE_PROCESS_ENTER);
+        AddRow(_("My Callsign:"),    m_myCall,  parent->m_myCallsign,        16);
+        AddRow(_("Their Name:"),     m_name,    wxEmptyString,               32);
+        AddRow(_("RST Sent:"),       m_rstSent, _("59"),                      8);
+        AddRow(_("RST Rcvd:"),       m_rstRcvd, wxString(rstRcvdBuf),         8);
+        AddRow(_("Comment:"),        m_comment, wxEmptyString,              128);
+
+        // POTA row: checkbox + park field on one grid row
+        m_potaCheck = new wxCheckBox(this, wxID_ANY, _("POTA"));
+        grid->Add(m_potaCheck, 0, wxALIGN_CENTER_VERTICAL);
+        m_potaPark = new wxTextCtrl(this, wxID_ANY, wxEmptyString,
+                                    wxDefaultPosition, wxSize(220, -1));
+        m_potaPark->SetMaxLength(16);
+        m_potaPark->SetHint(_("Park ref (e.g. K-0001)"));
+        m_potaPark->Enable(false);
+        grid->Add(m_potaPark, 1, wxEXPAND);
+        m_potaCheck->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            m_potaPark->Enable(m_potaCheck->IsChecked());
+            if (m_potaCheck->IsChecked()) m_potaPark->SetFocus();
+        });
+        AddRow(_("Freq (MHz):"),     m_freq,    wxString(freqBuf),           12);
+        AddRow(_("Band:"),           m_band,    _("20m"),                     8);
+        AddRow(_("Mode:"),           m_mode,    _("USB"),                     8);
+        AddRow(_("QSO Date (UTC):"), m_date,    wxString(dateBuf),            8);
+        AddRow(_("Time On (UTC):"),  m_timeOn,  wxString(timeBuf),            6);
+
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-        sizer->Add(new wxStaticText(this, wxID_ANY, _("Remote Callsign:")), 0, wxLEFT | wxTOP | wxRIGHT, 12);
-        m_text = new wxTextCtrl(this, wxID_ANY, lastCall,
-                                wxDefaultPosition, wxSize(200, 32), wxTE_PROCESS_ENTER);
-        m_text->SetMaxLength(16);
-        m_text->SelectAll();
-        sizer->Add(m_text, 0, wxALL, 8);
+        sizer->Add(grid, 1, wxEXPAND | wxALL, 12);
         wxButton* ok = new wxButton(this, wxID_ANY, _("LOG"));
         sizer->Add(ok, 0, wxALL | wxALIGN_CENTER, 8);
         SetSizer(sizer);
         Fit();
-        m_text->SetFocus();
-        m_text->Bind(wxEVT_TEXT_ENTER, &LogDialog::OnOK, this);
+
+        m_call->SetFocus();
+        m_call->SelectAll();
+        m_call->Bind(wxEVT_TEXT_ENTER, &LogDialog::OnOK, this);
         ok->Bind(wxEVT_BUTTON, &LogDialog::OnOK, this);
         Bind(wxEVT_CLOSE_WINDOW, &LogDialog::OnClose, this);
     }
 
 private:
     MyFrame*    m_parent;
-    wxTextCtrl* m_text;
+    wxTextCtrl* m_call;
+    wxTextCtrl* m_myCall;
+    wxTextCtrl* m_name;
+    wxTextCtrl* m_rstSent;
+    wxTextCtrl* m_rstRcvd;
+    wxTextCtrl* m_comment;
+    wxCheckBox* m_potaCheck;
+    wxTextCtrl* m_potaPark;
+    wxTextCtrl* m_freq;
+    wxTextCtrl* m_band;
+    wxTextCtrl* m_mode;
+    wxTextCtrl* m_date;
+    wxTextCtrl* m_timeOn;
+
+    static std::string AdifField(const char* name, const std::string& val)
+    {
+        if (val.empty()) return "";
+        char buf[512];
+        sprintf_s(buf, "<%s:%d>%s", name, (int)val.size(), val.c_str());
+        return buf;
+    }
 
     void DoLog()
     {
-        wxString callsign = m_text->GetValue().Left(16);
+        wxString callsign = m_call->GetValue().Left(16).Upper();
         m_parent->RemoteCallsign = callsign;
+        m_parent->m_myCallsign   = m_myCall->GetValue().Left(16).Upper();
+        strncpy_s(m_parent->myRadio->myCallsign, sizeof(m_parent->myRadio->myCallsign),
+                  m_parent->m_myCallsign.ToStdString().c_str(), _TRUNCATE);
 
-        time_t now = time(nullptr);
-        struct tm gmt;
-        gmtime_s(&gmt, &now);
-
-        std::ofstream f("log.txt", std::ios::app);
-        if (f.is_open())
+        bool needsHeader = false;
         {
-            int sunit = m_parent->myRadio->myStatus->Sunit;
-            char sReport[8];
-            if (sunit > 9)
-                sprintf_s(sReport, "S9+");
-            else
-                sprintf_s(sReport, "S%d", sunit);
-            char buf[128];
-            sprintf_s(buf, "%04d-%02d-%02d,%02d:%02d:%02d UTC,%s,%.4f MHz,%s\n",
-                gmt.tm_year + 1900, gmt.tm_mon + 1, gmt.tm_mday,
-                gmt.tm_hour, gmt.tm_min, gmt.tm_sec,
-                callsign.ToStdString().c_str(),
-                m_parent->myRadio->LOfreq,
-                sReport);
-            f << buf;
+            std::ifstream testf("log.adi", std::ios::binary | std::ios::ate);
+            needsHeader = !testf.is_open() || testf.tellg() == 0;
         }
+
+        std::ofstream f("log.adi", std::ios::app);
+        if (!f.is_open()) { Destroy(); return; }
+
+        if (needsHeader)
+        {
+            f << "QRO20 Radio ADIF Log\n";
+            f << "<adif_ver:5>3.1.4\n";
+            f << "<programid:11>QRO20 Radio\n";
+            f << "<EOH>\n\n";
+        }
+
+        std::string rec;
+        rec += AdifField("CALL",             callsign.ToStdString());
+        rec += AdifField("QSO_DATE",         m_date->GetValue().ToStdString());
+        rec += AdifField("TIME_ON",          m_timeOn->GetValue().ToStdString());
+        rec += AdifField("BAND",             m_band->GetValue().ToStdString());
+        rec += AdifField("FREQ",             m_freq->GetValue().ToStdString());
+        rec += AdifField("MODE",             m_mode->GetValue().ToStdString());
+        rec += AdifField("RST_SENT",         m_rstSent->GetValue().ToStdString());
+        rec += AdifField("RST_RCVD",         m_rstRcvd->GetValue().ToStdString());
+        rec += AdifField("STATION_CALLSIGN", m_parent->m_myCallsign.ToStdString());
+        rec += AdifField("NAME",             m_name->GetValue().ToStdString());
+        rec += AdifField("COMMENT",          m_comment->GetValue().ToStdString());
+        if (m_potaCheck->IsChecked())
+        {
+            rec += AdifField("MY_SIG",      "POTA");
+            rec += AdifField("MY_SIG_INFO", m_potaPark->GetValue().ToStdString());
+        }
+        rec += "<EOR>\n";
+        f << rec;
+
         Destroy();
     }
 
@@ -628,6 +768,12 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button5->SetBackgroundColour(wxColor(32, 32, 32));
     m_button5->SetForegroundColour(wxColor(255, 255, 128));
     gSizer1->Add(m_button5, 0, wxALL, 2);
+
+    m_buttonSync = new wxButton(this, wxID_ANY, _("   SYNC    "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_buttonSync->SetFont(bf);
+    m_buttonSync->SetBackgroundColour(wxColor(32, 32, 32));
+    m_buttonSync->SetForegroundColour(wxColor(255, 255, 128));
+    gSizer1->Add(m_buttonSync, 0, wxALL, 2);
 
     //wxStaticText* staticText1 = new wxStaticText(this, wxID_ANY, _("FREQUENCY"), wxDefaultPosition, wxSize(180, 40), 0);
     //staticText1->SetFont(bf);
@@ -735,6 +881,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button9->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B9Click), NULL, this);
     m_button10->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B10Click), NULL, this);
     m_button11->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BLogClick), NULL, this);
+    m_buttonSync->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BSyncClick), NULL, this);
 
     SPtoTX = false;
     antTuneRun = false;
@@ -773,7 +920,10 @@ void MyFrame::OnFileLoad(wxCommandEvent& event)
         _("JSON files (*.json)|*.json"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     if (dlg.ShowModal() == wxID_CANCEL) return;
     if (myRadio->LoadSettings(dlg.GetPath().mb_str()))
+    {
         m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
+        m_myCallsign = wxString(myRadio->myCallsign, wxConvUTF8);
+    }
 }
 
 void MyFrame::OnSetComPort(wxCommandEvent& event)
@@ -936,7 +1086,10 @@ void MyFrame::B1Click(wxCommandEvent& event) // CONNECT
     {
         m_button1->SetLabelText(_(" CONNECTED "));
         if (myRadio->LoadSettings("settings.json"))
+        {
             m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
+            m_myCallsign = wxString(myRadio->myCallsign, wxConvUTF8);
+        }
     }
 
     m_panel1->Refresh(false);
@@ -964,6 +1117,12 @@ void MyFrame::B4Click(wxCommandEvent& event) // TRANSMIT
 void MyFrame::B5Click(wxCommandEvent& event) // RECEIVE
 {
     myRadio->myStatus->mode = 1;
+}
+
+void MyFrame::BSyncClick(wxCommandEvent& event) // SYNC
+{
+    myRadio->myStatus->calMode = 6;
+    myRadio->myStatus->mode = VNA_MODE;
 }
 
 void MyFrame::B6Click(wxCommandEvent& event) // MHz
@@ -1015,7 +1174,7 @@ void MyFrame::B10Click(wxCommandEvent& event)
 
 void MyFrame::BLogClick(wxCommandEvent& event)
 {
-    LogDialog* dlg = new LogDialog(this, RemoteCallsign);
+    LogDialog* dlg = new LogDialog(this, wxEmptyString);
     dlg->Show(true);
 }
 

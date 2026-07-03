@@ -23,6 +23,7 @@
 #include <wx/icon.h>
 #include <wx/slider.h>
 #include <wx/frame.h>
+#include <cstring>
 
 class CRadio;
 
@@ -45,7 +46,12 @@ public:
         VSWRModified = true;
         RFModified = true;
         isPartial = false;
+        memset(wfPixels, 0, sizeof(wfPixels));
     }
+
+    static constexpr int WF_ROWS = 100;
+    static constexpr int WF_BINS = 250;
+    unsigned char wfPixels[WF_ROWS * WF_BINS * 3];
 
     bool textModified;
     bool audioModified;
@@ -125,6 +131,7 @@ protected:
     wxButton* m_button9;
     wxButton* m_button10;
     wxButton* m_button11;
+    wxButton* m_buttonSync;
     wxSlider* m_slider1;
     wxTextCtrl* m_textCtrl1;
     wxTextCtrl* m_textCtrl2;
@@ -169,12 +176,14 @@ public:
     void OnAudioCESSBSetpoint(wxCommandEvent& event);
     void OnPlotSettings(wxCommandEvent& event);
     void BLogClick(wxCommandEvent& event);
+    void BSyncClick(wxCommandEvent& event);
     void UpdateDebugText(char* text);
 
     CRadio*   myRadio;
     bool      SPtoTX;
     bool      antTuneRun;
     wxString  RemoteCallsign;
+    wxString  m_myCallsign;
     wxDECLARE_EVENT_TABLE();
 
 };
