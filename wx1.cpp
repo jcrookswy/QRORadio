@@ -829,6 +829,9 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->Append(ID_SWEEP_TUNER,   _("Sweep &Tuner"));
     radioMenu->Append(ID_SWEEP_ANTENNA, _("Sweep &Antenna"));
     radioMenu->AppendSeparator();
+    radioMenu->AppendCheckItem(ID_IMAGE_REJECT, _("Image &Reject"));
+    radioMenu->Check(ID_IMAGE_REJECT, true);
+    radioMenu->AppendSeparator();
     radioMenu->Append(ID_PLOT_SETTINGS, _("&Plot Settings..."));
     menuBar->Append(radioMenu, _("&Radio"));
     wxMenu* audioMenu = new wxMenu();
@@ -840,6 +843,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnFileSave,   this, wxID_SAVE);
     Bind(wxEVT_MENU, &MyFrame::OnSetComPort,  this, ID_RADIO_SET_COM);
     Bind(wxEVT_MENU, &MyFrame::OnMyCallsign,  this, ID_MY_CALLSIGN);
+    Bind(wxEVT_MENU, &MyFrame::OnImageReject,  this, ID_IMAGE_REJECT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepOpen,  this, ID_SWEEP_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepShort, this, ID_SWEEP_SHORT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
@@ -851,6 +855,18 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
 
     myRadio = new CRadio();//Do this after frame exists
 
+    // --- Color palette (centralized; was previously inline per-widget literals) ---
+    const wxColour kBgDark(45, 45, 48);      // frame + group-box background
+    const wxColour kBtnBg(32, 32, 32);       // general button bg
+    const wxColour kBtnFg(255, 255, 128);    // general button fg
+    const wxColour kLogBtnBg(32, 64, 32);    // LOG/VIEW LOG bg
+    const wxColour kLogBtnFg(128, 255, 128); // LOG/VIEW LOG fg
+    const wxColour kLabelFg(220, 220, 220);  // static text / group-box titles
+    const wxColour kReadoutBg(20, 20, 20);   // text entries (freq, step, debug)
+    const wxColour kReadoutFg(255, 255, 128);
+
+    this->SetBackgroundColour(kBgDark);
+
     wxBoxSizer* bSizer1;
     bSizer1 = new wxBoxSizer(wxHORIZONTAL);
 
@@ -858,151 +874,167 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     bSizer2 = new wxBoxSizer(wxVERTICAL);
 
     m_panel1 = new BasicDrawPane(this, myRadio, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-    m_panel1->SetBackgroundColour(wxColour(64, 64, 64));
+    m_panel1->SetBackgroundColour(wxColour(64, 64, 64)); // intentionally lighter than frame - "screen" vs bezel
 
     bSizer2->Add(m_panel1, 1, wxEXPAND | wxALL, 5);
 
 
     bSizer1->Add(bSizer2, 1, wxEXPAND, 5);
 
-    wxFlexGridSizer* gSizer1;
-    gSizer1 = new wxFlexGridSizer(0, 1, 2, 2);
-    gSizer1->SetFlexibleDirection(wxBOTH);
-    gSizer1->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
+    wxBoxSizer* controlsSizer = new wxBoxSizer(wxVERTICAL);
 
+    // --- Group: Control ---
+    wxStaticBoxSizer* controlBox = new wxStaticBoxSizer(wxVERTICAL, this, _("Control"));
+    controlBox->GetStaticBox()->SetBackgroundColour(kBgDark);
+    controlBox->GetStaticBox()->SetForegroundColour(kLabelFg);
+    wxWindow* controlParent = controlBox->GetStaticBox();
 
-    //wxGridSizer* gSizer1;
-    //gSizer1 = new wxGridSizer(8, 1, 5, 5);
-
-    m_button1 = new wxButton(this, wxID_ANY, _("  CONNECT  "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button1 = new wxButton(controlParent, wxID_ANY, _("  CONNECT  "), wxDefaultPosition, wxSize(210, 40), 0);
     wxFont bf = m_button1->GetFont();
     bf.SetPointSize(16);
     bf.MakeBold();
     m_button1->SetFont(bf);
-    m_button1->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button1->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button1, 0, wxALL, 2);
+    m_button1->SetBackgroundColour(kBtnBg);
+    m_button1->SetForegroundColour(kBtnFg);
+    controlBox->Add(m_button1, 0, wxALL, 2);
 
-    m_button2 = new wxButton(this, wxID_ANY, _("DISABLE 24V "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button2 = new wxButton(controlParent, wxID_ANY, _("DISABLE 24V "), wxDefaultPosition, wxSize(210, 40), 0);
     m_button2->SetFont(bf);
-    m_button2->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button2->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button2, 0, wxALL, 2);
+    m_button2->SetBackgroundColour(kBtnBg);
+    m_button2->SetForegroundColour(kBtnFg);
+    controlBox->Add(m_button2, 0, wxALL, 2);
 
-    m_button3 = new wxButton(this, wxID_ANY, _(" ANT TUNE  "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button3 = new wxButton(controlParent, wxID_ANY, _(" ANT TUNE  "), wxDefaultPosition, wxSize(210, 40), 0);
     m_button3->SetFont(bf);
-    m_button3->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button3->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button3, 0, wxALL, 2);
+    m_button3->SetBackgroundColour(kBtnBg);
+    m_button3->SetForegroundColour(kBtnFg);
+    controlBox->Add(m_button3, 0, wxALL, 2);
 
-    m_button4 = new wxButton(this, wxID_ANY, _(" TRANSMIT  "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button4 = new wxButton(controlParent, wxID_ANY, _(" TRANSMIT  "), wxDefaultPosition, wxSize(210, 40), 0);
     m_button4->SetFont(bf);
-    m_button4->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button4->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button4, 0, wxALL, 2);
+    m_button4->SetBackgroundColour(kBtnBg);
+    m_button4->SetForegroundColour(kBtnFg);
+    controlBox->Add(m_button4, 0, wxALL, 2);
 
-    m_button5 = new wxButton(this, wxID_ANY, _(" RECEIVE  "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button5 = new wxButton(controlParent, wxID_ANY, _(" RECEIVE  "), wxDefaultPosition, wxSize(210, 40), 0);
     m_button5->SetFont(bf);
-    m_button5->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button5->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button5, 0, wxALL, 2);
+    m_button5->SetBackgroundColour(kBtnBg);
+    m_button5->SetForegroundColour(kBtnFg);
+    controlBox->Add(m_button5, 0, wxALL, 2);
 
-    m_buttonSync = new wxButton(this, wxID_ANY, _("   SYNC    "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_buttonSync = new wxButton(controlParent, wxID_ANY, _("   SYNC    "), wxDefaultPosition, wxSize(210, 40), 0);
     m_buttonSync->SetFont(bf);
-    m_buttonSync->SetBackgroundColour(wxColor(32, 32, 32));
-    m_buttonSync->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_buttonSync, 0, wxALL, 2);
+    m_buttonSync->SetBackgroundColour(kBtnBg);
+    m_buttonSync->SetForegroundColour(kBtnFg);
+    controlBox->Add(m_buttonSync, 0, wxALL, 2);
 
-    //wxStaticText* staticText1 = new wxStaticText(this, wxID_ANY, _("FREQUENCY"), wxDefaultPosition, wxSize(180, 40), 0);
-    //staticText1->SetFont(bf);
-    //gSizer1->Add(staticText1, 0, wxALL, 5);
+    controlsSizer->Add(controlBox, 0, wxEXPAND | wxALL, 2);
 
-    wxGridSizer* gSizer2;
-    gSizer2 = new wxGridSizer(2, 2, 0, 0);
- 
+    // --- Group: Frequency ---
+    wxStaticBoxSizer* freqBox = new wxStaticBoxSizer(wxVERTICAL, this, _("Frequency"));
+    freqBox->GetStaticBox()->SetBackgroundColour(kBgDark);
+    freqBox->GetStaticBox()->SetForegroundColour(kLabelFg);
+    wxWindow* freqParent = freqBox->GetStaticBox();
 
-    m_textCtrl1 = new wxTextCtrl(this, wxID_ANY, _("14.25000"), wxDefaultPosition, wxSize(105,40), 0);
+    // 2x3 grid so the frequency row and step row share column widths and line up
+    // left/right edge to edge, instead of each row sizing itself independently.
+    wxFlexGridSizer* freqGrid = new wxFlexGridSizer(2, 3, 2, 0);
+
+    wxFont stepperFont = bf;
+    stepperFont.SetPointSize(9);
+
+    wxBoxSizer* stepperStack = new wxBoxSizer(wxVERTICAL);
+
+    m_button8 = new wxButton(freqParent, wxID_ANY, _("+"), wxDefaultPosition, wxSize(34, 18), 0);
+    m_button8->SetFont(stepperFont);
+    m_button8->SetBackgroundColour(kBtnBg);
+    m_button8->SetForegroundColour(kBtnFg);
+    stepperStack->Add(m_button8, 0, wxBOTTOM, 1);
+
+    m_button7 = new wxButton(freqParent, wxID_ANY, _("-"), wxDefaultPosition, wxSize(34, 18), 0);
+    m_button7->SetFont(stepperFont);
+    m_button7->SetBackgroundColour(kBtnBg);
+    m_button7->SetForegroundColour(kBtnFg);
+    stepperStack->Add(m_button7, 0, 0, 0);
+
+    freqGrid->Add(stepperStack, 0, wxALIGN_CENTER_VERTICAL);
+
+    m_textCtrl1 = new wxTextCtrl(freqParent, wxID_ANY, _("14.25000"), wxDefaultPosition, wxSize(105,40), 0);
     m_textCtrl1->SetFont(bf);
-    gSizer2->Add(m_textCtrl1, 0, wxALL, 5);
+    m_textCtrl1->SetBackgroundColour(kReadoutBg);
+    m_textCtrl1->SetForegroundColour(kReadoutFg);
+    freqGrid->Add(m_textCtrl1, 0, wxRIGHT, 5);
 
-    m_button6 = new wxButton(this, wxID_ANY, _("MHz"), wxDefaultPosition, wxSize(60, 40), 0);
+    m_button6 = new wxButton(freqParent, wxID_ANY, _("MHz"), wxDefaultPosition, wxSize(60, 40), 0);
     m_button6->SetFont(bf);
-    m_button6->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button6->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer2->Add(m_button6, 0, wxALL, 5);
+    m_button6->SetBackgroundColour(kBtnBg);
+    m_button6->SetForegroundColour(kBtnFg);
+    freqGrid->Add(m_button6, 0, 0);
 
-    m_button7 = new wxButton(this, wxID_ANY, _(" - "), wxDefaultPosition, wxSize(60, 40), 0);
-    m_button7->SetFont(bf);
-    m_button7->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button7->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer2->Add(m_button7, 0, wxALL, 5);
+    wxStaticText* staticText2 = new wxStaticText(freqParent, wxID_ANY, _("STEP"), wxDefaultPosition, wxDefaultSize, 0);
+    staticText2->SetFont(stepperFont);
+    staticText2->SetForegroundColour(kLabelFg);
+    freqGrid->Add(staticText2, 0, wxALIGN_CENTER_VERTICAL);
 
-    m_button8 = new wxButton(this, wxID_ANY, _(" + "), wxDefaultPosition, wxSize(60, 40), 0);
-    m_button8->SetFont(bf);
-    m_button8->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button8->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer2->Add(m_button8, 0, wxALL, 5);
-
-
-
-    gSizer1->Add(gSizer2, 0, wxALL, 2);
-
-    wxFlexGridSizer* gSizer3;
-    gSizer3 = new wxFlexGridSizer(1, 3, 0, 0);
-    gSizer3->SetFlexibleDirection(wxBOTH);
-    gSizer3->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);
-
-
-    //wxGridSizer* gSizer3;
-    //gSizer3 = new wxGridSizer(1, 3, 0, 0);
-
-    wxStaticText* staticText2 = new wxStaticText(this, wxID_ANY, _("STEP"), wxDefaultPosition, wxSize(50, 40), 0);
-    staticText2->SetFont(bf);
-    gSizer3->Add(staticText2, 0, wxALL, 2);
-
-    m_textCtrl2 = new wxTextCtrl(this, wxID_ANY, _("1000"), wxDefaultPosition, wxSize(65, 40), 0);
+    m_textCtrl2 = new wxTextCtrl(freqParent, wxID_ANY, _("1000"), wxDefaultPosition, wxSize(105, 40), 0);
     m_textCtrl2->SetFont(bf);
-    gSizer3->Add(m_textCtrl2, 0, wxALL, 2);
+    m_textCtrl2->SetBackgroundColour(kReadoutBg);
+    m_textCtrl2->SetForegroundColour(kReadoutFg);
+    freqGrid->Add(m_textCtrl2, 0, wxRIGHT, 5);
 
-    m_button9 = new wxButton(this, wxID_ANY, _("Hz"), wxDefaultPosition, wxSize(50, 40), 0);
+    m_button9 = new wxButton(freqParent, wxID_ANY, _("Hz"), wxDefaultPosition, wxSize(60, 40), 0);
     m_button9->SetFont(bf);
-    m_button9->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button9->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer3->Add(m_button9, 0, wxALL, 2);
+    m_button9->SetBackgroundColour(kBtnBg);
+    m_button9->SetForegroundColour(kBtnFg);
+    freqGrid->Add(m_button9, 0, 0);
 
-    //   m_button4 = new wxButton(this, wxID_ANY, _("MyButton"), wxDefaultPosition, wxDefaultSize, 0);
- //   gSizer1->Add(m_button4, 0, wxALL, 5);
+    freqBox->Add(freqGrid, 0, wxALL, 5);
 
- //   m_slider1 = new wxSlider(this, wxID_ANY, 50, 0, 100, wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
- //   gSizer1->Add(m_slider1, 0, wxALL, 5);
-    gSizer1->Add(gSizer3, 0, wxALL, 2);
+    controlsSizer->Add(freqBox, 0, wxEXPAND | wxALL, 2);
 
-    m_button10 = new wxButton(this, wxID_ANY, _("Hotkeys = Y"), wxDefaultPosition, wxSize(180, 40), 0);
+    // --- Group: Options ---
+    wxStaticBoxSizer* optionsBox = new wxStaticBoxSizer(wxVERTICAL, this, _("Options"));
+    optionsBox->GetStaticBox()->SetBackgroundColour(kBgDark);
+    optionsBox->GetStaticBox()->SetForegroundColour(kLabelFg);
+    wxWindow* optionsParent = optionsBox->GetStaticBox();
+
+    m_button10 = new wxButton(optionsParent, wxID_ANY, _("Hotkeys = Y"), wxDefaultPosition, wxSize(210, 40), 0);
     m_button10->SetFont(bf);
-    m_button10->SetBackgroundColour(wxColor(32, 32, 32));
-    m_button10->SetForegroundColour(wxColor(255, 255, 128));
-    gSizer1->Add(m_button10, 0, wxALL, 2);
+    m_button10->SetBackgroundColour(kBtnBg);
+    m_button10->SetForegroundColour(kBtnFg);
+    optionsBox->Add(m_button10, 0, wxALL, 2);
 
-    
-    m_textDebug = new wxTextCtrl(this, wxID_ANY, _("DEBUG"), wxDefaultPosition, wxSize(180, 40), 0);
+    m_textDebug = new wxTextCtrl(optionsParent, wxID_ANY, _("DEBUG"), wxDefaultPosition, wxSize(210, 40), 0);
     m_textDebug->SetFont(bf);
-    gSizer1->Add(m_textDebug, 0, wxALL, 2);
+    m_textDebug->SetBackgroundColour(kReadoutBg);
+    m_textDebug->SetForegroundColour(kReadoutFg);
+    optionsBox->Add(m_textDebug, 0, wxALL, 2);
 
-    m_button11 = new wxButton(this, wxID_ANY, _("    LOG    "), wxDefaultPosition, wxSize(180, 40), 0);
+    controlsSizer->Add(optionsBox, 0, wxEXPAND | wxALL, 2);
+
+    // --- Group: Log ---
+    wxStaticBoxSizer* logBox = new wxStaticBoxSizer(wxVERTICAL, this, _("Log"));
+    logBox->GetStaticBox()->SetBackgroundColour(kBgDark);
+    logBox->GetStaticBox()->SetForegroundColour(kLabelFg);
+    wxWindow* logParent = logBox->GetStaticBox();
+
+    m_button11 = new wxButton(logParent, wxID_ANY, _("    LOG    "), wxDefaultPosition, wxSize(210, 40), 0);
     m_button11->SetFont(bf);
-    m_button11->SetBackgroundColour(wxColor(32, 64, 32));
-    m_button11->SetForegroundColour(wxColor(128, 255, 128));
-    gSizer1->Add(m_button11, 0, wxALL, 2);
+    m_button11->SetBackgroundColour(kLogBtnBg);
+    m_button11->SetForegroundColour(kLogBtnFg);
+    logBox->Add(m_button11, 0, wxALL, 2);
 
-    m_buttonViewLog = new wxButton(this, wxID_ANY, _("  VIEW LOG  "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_buttonViewLog = new wxButton(logParent, wxID_ANY, _("  VIEW LOG  "), wxDefaultPosition, wxSize(210, 40), 0);
     m_buttonViewLog->SetFont(bf);
-    m_buttonViewLog->SetBackgroundColour(wxColor(32, 64, 32));
-    m_buttonViewLog->SetForegroundColour(wxColor(128, 255, 128));
-    gSizer1->Add(m_buttonViewLog, 0, wxALL, 2);
+    m_buttonViewLog->SetBackgroundColour(kLogBtnBg);
+    m_buttonViewLog->SetForegroundColour(kLogBtnFg);
+    logBox->Add(m_buttonViewLog, 0, wxALL, 2);
+
+    controlsSizer->Add(logBox, 0, wxEXPAND | wxALL, 2);
 
     RemoteCallsign = wxEmptyString;
 
-    bSizer1->Add(gSizer1, 0, wxALIGN_TOP, 5);
+    bSizer1->Add(controlsSizer, 0, wxALIGN_TOP, 5);
 
 
     this->SetSizer(bSizer1);
@@ -1092,6 +1124,11 @@ void MyFrame::OnMyCallsign(wxCommandEvent& event)
     strncpy_s(myRadio->myCallsign, sizeof(myRadio->myCallsign),
               m_myCallsign.ToStdString().c_str(), _TRUNCATE);
     myRadio->SaveSettings("settings.json");
+}
+
+void MyFrame::OnImageReject(wxCommandEvent& event)
+{
+    myRadio->IQBalanceEnabled = event.IsChecked();
 }
 
 void MyFrame::OnSweepOpen(wxCommandEvent& event)  {

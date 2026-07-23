@@ -221,6 +221,9 @@ CRadio::CRadio()
     plotSfloor  = 2;
     plotSunits  = 11;
     plotSoffset = 0.0f;
+    IQCorrAlpha = 1.0f;
+    IQCorrBeta  = 0.0f;
+    IQBalanceEnabled = true;
     memset(myCallsign, 0, sizeof(myCallsign));
 
     audioInBuf = new Ipp32f[16384];
@@ -367,8 +370,13 @@ CRadio::~CRadio()
     //To do: delete everything we allocated
     if (connected)
     {
+        if (myStatus->mode != IDLE_MODE)
+        {
+            myStatus->mode = IDLE_MODE;
+            Sleep(250);
+        }
         connected = false;
-        myStatus->mode = IDLE_MODE;
+        //myStatus->mode = IDLE_MODE;
         Pa_StopStream(stream);
         connected = false;
         myAThread.join();
@@ -420,6 +428,57 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
         if (IQReadAddr > 15999) IQReadAddr = 0;
 
         ippsCopy_32fc(&RawIQData[IQReadAddr], &WindowedData[125], 125); //This will be reused next time
+
+        // Wideband adaptive I/Q image-balance correction, applied to the raw (pre-tune) block.
+        // Shear model: Icorr = I, Qcorr = alpha*Q - beta*I.
+        //
+        // The error terms are normalized (a correlation coefficient for phase, a power ratio
+        // for gain) so the step reflects actual imbalance *magnitude*, not the block's absolute
+        // signal level - raw unnormalized sums would saturate the clamp on almost every block
+        // (real captured RF is rarely silent), turning this into a fixed-rate walk regardless of
+        // whether there's really a strong signal to learn from. "Strong signal converges fast,
+        // weak signal barely moves it" instead comes from an explicit confidence weight below,
+        // scaled by how far the block's energy is above a reference (quiet-band) level.
+        if (!IQBalanceEnabled)
+        {
+            IQCorrAlpha = 1.0f;
+            IQCorrBeta  = 0.0f;
+        }
+        else
+        {
+            float sumIQ = 0.0f, sumII = 0.0f, sumQQ = 0.0f;
+            for (int n = 0; n < 250; n++)
+            {
+                float rawI  = WindowedData[n].im;
+                float rawQ  = WindowedData[n].re;
+                float corrI = rawI;
+                float corrQ = IQCorrAlpha * rawQ - IQCorrBeta * rawI;
+                WindowedData[n].im = corrI;
+                WindowedData[n].re = corrQ;
+                sumIQ += corrI * corrQ;
+                sumII += corrI * corrI;
+                sumQQ += corrQ * corrQ; 
+            }
+
+            const float eps = 1.0e-12f;
+            float totalPower = sumII + sumQQ;
+            float rho    = sumIQ / sqrtf(sumII * sumQQ + eps);   // phase/skew error, in [-1,1]
+            float powErr = (sumQQ - sumII) / (totalPower + eps); // gain error, in [-1,1]
+
+            const float refPower = 0.02f; // block power ~= "a strong signal" - needs on-air tuning
+            float weight = totalPower / refPower;
+            if (weight > 1.0f) weight = 1.0f;
+
+            const float muPhase = 1.0e-2f; // starting points only - needs on-air tuning
+            const float muGain  = 1.0e-2f;
+
+            IQCorrBeta  += muPhase * rho    * weight;
+            IQCorrAlpha -= muGain  * powErr * weight;
+            if      (IQCorrAlpha < 0.8f)  IQCorrAlpha = 0.8f;
+            else if (IQCorrAlpha > 1.25f) IQCorrAlpha = 1.25f;
+            if      (IQCorrBeta < -0.2f) IQCorrBeta = -0.2f;
+            else if (IQCorrBeta >  0.2f) IQCorrBeta =  0.2f;
+        }
 
         // Tune
         ippsTone_32fc(TunerData, 250, 1.0, TunerFreq, &TunerPhase, ippAlgHintFast);

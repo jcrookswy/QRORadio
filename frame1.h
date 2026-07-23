@@ -111,6 +111,7 @@ enum {
     ID_AUDIO_CESSB_SETPOINT,
     ID_PLOT_SETTINGS,
     ID_MY_CALLSIGN,
+    ID_IMAGE_REJECT,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -178,6 +179,7 @@ public:
     void OnAudioCESSBSetpoint(wxCommandEvent& event);
     void OnPlotSettings(wxCommandEvent& event);
     void OnMyCallsign(wxCommandEvent& event);
+    void OnImageReject(wxCommandEvent& event);
     void BLogClick(wxCommandEvent& event);
     void BSyncClick(wxCommandEvent& event);
     void BViewLogClick(wxCommandEvent& event);

@@ -122,6 +122,10 @@ public:
 	int   plotSunits;   // number of S-unit divisions shown (8-24)
 	float plotSoffset;  // calibration trim in dB (-10 to +10)
 
+	float IQCorrAlpha;    // adaptive RX I/Q gain-balance correction (wideband, pre-tune)
+	float IQCorrBeta;     // adaptive RX I/Q phase/skew-balance correction (wideband, pre-tune)
+	bool  IQBalanceEnabled; // user toggle (Radio > Image Reject menu)
+
 	Ipp32f* MagData ;
 	Ipp32f* MagMinAccumData;
 	Ipp32f* MagAccumData;
