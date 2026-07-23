@@ -1,10 +1,13 @@
 // Start of wxWidgets "Hello World" Program
 #include <wx/wx.h>
 #include <wx/numdlg.h>
+#include <wx/listctrl.h>
 #include <cmath>
 #include <ctime>
 #include <fstream>
 #include <string>
+#include <vector>
+#include <map>
 //#include "MyProjectBase.h"
 #include "frame1.h"
 #include "CRadio.h"
@@ -528,13 +531,7 @@ public:
                    wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
         , m_parent(parent)
     {
-        time_t now = time(nullptr);
-        struct tm gmt;
-        gmtime_s(&gmt, &now);
-
-        char dateBuf[16], timeBuf[16], freqBuf[16], rstRcvdBuf[8];
-        sprintf_s(dateBuf, "%04d%02d%02d", gmt.tm_year + 1900, gmt.tm_mon + 1, gmt.tm_mday);
-        sprintf_s(timeBuf, "%02d%02d%02d", gmt.tm_hour, gmt.tm_min, gmt.tm_sec);
+        char freqBuf[16], rstRcvdBuf[8];
         sprintf_s(freqBuf, "%.4f", parent->myRadio->LOfreq);
 
         int sunit = parent->myRadio->myStatus->Sunit;
@@ -556,30 +553,43 @@ public:
         };
 
         AddRow(_("Their Call:"),     m_call,    lastCall,                    16, wxTE_PROCESS_ENTER);
-        AddRow(_("My Callsign:"),    m_myCall,  parent->m_myCallsign,        16);
         AddRow(_("Their Name:"),     m_name,    wxEmptyString,               32);
         AddRow(_("RST Sent:"),       m_rstSent, _("59"),                      8);
         AddRow(_("RST Rcvd:"),       m_rstRcvd, wxString(rstRcvdBuf),         8);
         AddRow(_("Comment:"),        m_comment, wxEmptyString,              128);
+        AddRow(_("Freq (MHz):"),     m_freq,    wxString(freqBuf),           12);
+        AddRow(_("Band:"),           m_band,    _("20m"),                     8);
+        AddRow(_("Mode:"),           m_mode,    _("USB"),                     8);
 
-        // POTA row: checkbox + park field on one grid row
+        // POTA row: checkbox + park field on the last grid row
         m_potaCheck = new wxCheckBox(this, wxID_ANY, _("POTA"));
+        m_potaCheck->SetValue(parent->m_potaChecked);
         grid->Add(m_potaCheck, 0, wxALIGN_CENTER_VERTICAL);
-        m_potaPark = new wxTextCtrl(this, wxID_ANY, wxEmptyString,
+        m_potaPark = new wxTextCtrl(this, wxID_ANY, parent->m_potaPark,
                                     wxDefaultPosition, wxSize(220, -1));
         m_potaPark->SetMaxLength(16);
         m_potaPark->SetHint(_("Park ref (e.g. K-0001)"));
-        m_potaPark->Enable(false);
+        m_potaPark->Enable(parent->m_potaChecked);
         grid->Add(m_potaPark, 1, wxEXPAND);
         m_potaCheck->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
             m_potaPark->Enable(m_potaCheck->IsChecked());
             if (m_potaCheck->IsChecked()) m_potaPark->SetFocus();
         });
-        AddRow(_("Freq (MHz):"),     m_freq,    wxString(freqBuf),           12);
-        AddRow(_("Band:"),           m_band,    _("20m"),                     8);
-        AddRow(_("Mode:"),           m_mode,    _("USB"),                     8);
-        AddRow(_("QSO Date (UTC):"), m_date,    wxString(dateBuf),            8);
-        AddRow(_("Time On (UTC):"),  m_timeOn,  wxString(timeBuf),            6);
+
+        // P2P row: checkbox + their park field, below the POTA row
+        m_p2pCheck = new wxCheckBox(this, wxID_ANY, _("P2P"));
+        m_p2pCheck->SetValue(parent->m_p2pChecked);
+        grid->Add(m_p2pCheck, 0, wxALIGN_CENTER_VERTICAL);
+        m_p2pPark = new wxTextCtrl(this, wxID_ANY, parent->m_p2pPark,
+                                    wxDefaultPosition, wxSize(220, -1));
+        m_p2pPark->SetMaxLength(16);
+        m_p2pPark->SetHint(_("Their park ref (e.g. K-0001)"));
+        m_p2pPark->Enable(parent->m_p2pChecked);
+        grid->Add(m_p2pPark, 1, wxEXPAND);
+        m_p2pCheck->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            m_p2pPark->Enable(m_p2pCheck->IsChecked());
+            if (m_p2pCheck->IsChecked()) m_p2pPark->SetFocus();
+        });
 
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
         sizer->Add(grid, 1, wxEXPAND | wxALL, 12);
@@ -598,18 +608,25 @@ public:
 private:
     MyFrame*    m_parent;
     wxTextCtrl* m_call;
-    wxTextCtrl* m_myCall;
     wxTextCtrl* m_name;
     wxTextCtrl* m_rstSent;
     wxTextCtrl* m_rstRcvd;
     wxTextCtrl* m_comment;
     wxCheckBox* m_potaCheck;
     wxTextCtrl* m_potaPark;
+    wxCheckBox* m_p2pCheck;
+    wxTextCtrl* m_p2pPark;
     wxTextCtrl* m_freq;
     wxTextCtrl* m_band;
     wxTextCtrl* m_mode;
-    wxTextCtrl* m_date;
-    wxTextCtrl* m_timeOn;
+
+    void SavePotaState()
+    {
+        m_parent->m_potaChecked = m_potaCheck->GetValue();
+        m_parent->m_potaPark    = m_potaPark->GetValue();
+        m_parent->m_p2pChecked  = m_p2pCheck->GetValue();
+        m_parent->m_p2pPark     = m_p2pPark->GetValue();
+    }
 
     static std::string AdifField(const char* name, const std::string& val)
     {
@@ -623,9 +640,6 @@ private:
     {
         wxString callsign = m_call->GetValue().Left(16).Upper();
         m_parent->RemoteCallsign = callsign;
-        m_parent->m_myCallsign   = m_myCall->GetValue().Left(16).Upper();
-        strncpy_s(m_parent->myRadio->myCallsign, sizeof(m_parent->myRadio->myCallsign),
-                  m_parent->m_myCallsign.ToStdString().c_str(), _TRUNCATE);
 
         bool needsHeader = false;
         {
@@ -644,10 +658,17 @@ private:
             f << "<EOH>\n\n";
         }
 
+        time_t logNow = time(nullptr);
+        struct tm logGmt;
+        gmtime_s(&logGmt, &logNow);
+        char timeBuf[8], dateBuf[16];
+        sprintf_s(timeBuf, "%02d%02d%02d", logGmt.tm_hour, logGmt.tm_min, logGmt.tm_sec);
+        sprintf_s(dateBuf, "%04d%02d%02d", logGmt.tm_year + 1900, logGmt.tm_mon + 1, logGmt.tm_mday);
+
         std::string rec;
         rec += AdifField("CALL",             callsign.ToStdString());
-        rec += AdifField("QSO_DATE",         m_date->GetValue().ToStdString());
-        rec += AdifField("TIME_ON",          m_timeOn->GetValue().ToStdString());
+        rec += AdifField("QSO_DATE",         dateBuf);
+        rec += AdifField("TIME_ON",          timeBuf);
         rec += AdifField("BAND",             m_band->GetValue().ToStdString());
         rec += AdifField("FREQ",             m_freq->GetValue().ToStdString());
         rec += AdifField("MODE",             m_mode->GetValue().ToStdString());
@@ -661,15 +682,130 @@ private:
             rec += AdifField("MY_SIG",      "POTA");
             rec += AdifField("MY_SIG_INFO", m_potaPark->GetValue().ToStdString());
         }
+        if (m_p2pCheck->IsChecked())
+        {
+            rec += AdifField("SIG",      "POTA");
+            rec += AdifField("SIG_INFO", m_p2pPark->GetValue().ToStdString());
+        }
         rec += "<EOR>\n";
         f << rec;
 
+        SavePotaState();
         Destroy();
     }
 
     void OnOK(wxCommandEvent&) { DoLog(); }
-    void OnClose(wxCloseEvent&) { Destroy(); }
+    void OnClose(wxCloseEvent&) { SavePotaState(); Destroy(); }
 };
+
+///////////////////////////////////////////////////////////////////////////
+
+static std::vector<std::map<std::string, std::string>> ParseAdif(const char* path)
+{
+    std::vector<std::map<std::string, std::string>> records;
+    std::ifstream f(path);
+    if (!f.is_open()) return records;
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    // Skip header up to <EOH>
+    size_t pos = 0;
+    {
+        std::string up = content;
+        for (auto& c : up) c = (char)toupper((unsigned char)c);
+        size_t eoh = up.find("<EOH>");
+        if (eoh != std::string::npos) pos = eoh + 5;
+    }
+
+    std::map<std::string, std::string> rec;
+    while (pos < content.size())
+    {
+        if (content[pos] != '<') { ++pos; continue; }
+        ++pos;
+        size_t close = content.find('>', pos);
+        if (close == std::string::npos) break;
+        std::string tag = content.substr(pos, close - pos);
+        pos = close + 1;
+
+        std::string tagUp = tag;
+        for (auto& c : tagUp) c = (char)toupper((unsigned char)c);
+        if (tagUp == "EOR") { if (!rec.empty()) { records.push_back(rec); rec.clear(); } continue; }
+        if (tagUp == "EOH") continue;
+
+        size_t colon = tag.find(':');
+        if (colon == std::string::npos) continue;
+        std::string name = tag.substr(0, colon);
+        for (auto& c : name) c = (char)toupper((unsigned char)c);
+        size_t colon2 = tag.find(':', colon + 1);
+        std::string lenStr = tag.substr(colon + 1, colon2 != std::string::npos ? colon2 - colon - 1 : std::string::npos);
+        int len = 0;
+        try { len = std::stoi(lenStr); } catch (...) { continue; }
+        if (len > 0 && pos + len <= content.size())
+        {
+            rec[name] = content.substr(pos, len);
+            pos += len;
+        }
+    }
+    return records;
+}
+
+class LogViewDialog : public wxDialog
+{
+public:
+    LogViewDialog(wxWindow* parent)
+        : wxDialog(parent, wxID_ANY, _("Log"), wxDefaultPosition, wxSize(900, 480),
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+    {
+        m_list = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                wxLC_REPORT | wxLC_HRULES | wxLC_VRULES | wxLC_SINGLE_SEL);
+        m_list->AppendColumn(_("Date"),    wxLIST_FORMAT_LEFT,  90);
+        m_list->AppendColumn(_("Time"),    wxLIST_FORMAT_LEFT,  55);
+        m_list->AppendColumn(_("Call"),    wxLIST_FORMAT_LEFT,  90);
+        m_list->AppendColumn(_("Name"),    wxLIST_FORMAT_LEFT,  90);
+        m_list->AppendColumn(_("RST R"),   wxLIST_FORMAT_LEFT,  52);
+        m_list->AppendColumn(_("Freq"),    wxLIST_FORMAT_LEFT,  80);
+        m_list->AppendColumn(_("Mode"),    wxLIST_FORMAT_LEFT,  50);
+        m_list->AppendColumn(_("Comment"), wxLIST_FORMAT_LEFT, 250);
+
+        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(m_list, 1, wxEXPAND | wxALL, 4);
+        SetSizer(sizer);
+        Reload();
+    }
+
+    void Reload()
+    {
+        m_list->DeleteAllItems();
+        auto records = ParseAdif("log.adi");
+        for (auto& rec : records)
+        {
+            auto get = [&](const char* k) -> std::string {
+                auto it = rec.find(k); return it != rec.end() ? it->second : "";
+            };
+
+            std::string date = get("QSO_DATE");
+            if (date.size() == 8)
+                date = date.substr(0,4) + "-" + date.substr(4,2) + "-" + date.substr(6,2);
+
+            std::string time = get("TIME_ON");
+            if (time.size() >= 4)
+                time = time.substr(0,2) + ":" + time.substr(2,2);
+
+            long idx = m_list->InsertItem(m_list->GetItemCount(), date);
+            m_list->SetItem(idx, 1, time);
+            m_list->SetItem(idx, 2, get("CALL"));
+            m_list->SetItem(idx, 3, get("NAME"));
+            m_list->SetItem(idx, 4, get("RST_RCVD"));
+            m_list->SetItem(idx, 5, get("FREQ"));
+            m_list->SetItem(idx, 6, get("MODE"));
+            m_list->SetItem(idx, 7, get("COMMENT"));
+        }
+    }
+
+private:
+    wxListCtrl* m_list;
+};
+
+///////////////////////////////////////////////////////////////////////////
 
 MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const wxPoint& pos, const wxSize& size, long style) : wxFrame(parent, id, title, pos, size, style)
 {
@@ -684,6 +820,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     menuBar->Append(fileMenu, _("&File"));
     wxMenu* radioMenu = new wxMenu();
     radioMenu->Append(ID_RADIO_SET_COM, _("Set COM &port..."));
+    radioMenu->Append(ID_MY_CALLSIGN,   _("My &Callsign..."));
     radioMenu->AppendSeparator();
     radioMenu->Append(ID_SWEEP_OPEN,  _("Sweep &Open"));
     radioMenu->Append(ID_SWEEP_SHORT, _("Sweep &Short"));
@@ -701,7 +838,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     this->SetMenuBar(menuBar);
     Bind(wxEVT_MENU, &MyFrame::OnFileLoad,   this, wxID_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnFileSave,   this, wxID_SAVE);
-    Bind(wxEVT_MENU, &MyFrame::OnSetComPort, this, ID_RADIO_SET_COM);
+    Bind(wxEVT_MENU, &MyFrame::OnSetComPort,  this, ID_RADIO_SET_COM);
+    Bind(wxEVT_MENU, &MyFrame::OnMyCallsign,  this, ID_MY_CALLSIGN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepOpen,  this, ID_SWEEP_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepShort, this, ID_SWEEP_SHORT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
@@ -839,7 +977,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
  //   gSizer1->Add(m_slider1, 0, wxALL, 5);
     gSizer1->Add(gSizer3, 0, wxALL, 2);
 
-    m_button10 = new wxButton(this, wxID_ANY, _("Hotkeys = N"), wxDefaultPosition, wxSize(180, 40), 0);
+    m_button10 = new wxButton(this, wxID_ANY, _("Hotkeys = Y"), wxDefaultPosition, wxSize(180, 40), 0);
     m_button10->SetFont(bf);
     m_button10->SetBackgroundColour(wxColor(32, 32, 32));
     m_button10->SetForegroundColour(wxColor(255, 255, 128));
@@ -855,6 +993,12 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button11->SetBackgroundColour(wxColor(32, 64, 32));
     m_button11->SetForegroundColour(wxColor(128, 255, 128));
     gSizer1->Add(m_button11, 0, wxALL, 2);
+
+    m_buttonViewLog = new wxButton(this, wxID_ANY, _("  VIEW LOG  "), wxDefaultPosition, wxSize(180, 40), 0);
+    m_buttonViewLog->SetFont(bf);
+    m_buttonViewLog->SetBackgroundColour(wxColor(32, 64, 32));
+    m_buttonViewLog->SetForegroundColour(wxColor(128, 255, 128));
+    gSizer1->Add(m_buttonViewLog, 0, wxALL, 2);
 
     RemoteCallsign = wxEmptyString;
 
@@ -882,8 +1026,9 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button10->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::B10Click), NULL, this);
     m_button11->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BLogClick), NULL, this);
     m_buttonSync->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BSyncClick), NULL, this);
+    m_buttonViewLog->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BViewLogClick), NULL, this);
 
-    SPtoTX = false;
+    SPtoTX = true;
     antTuneRun = false;
     m_button4->Enable(false);
     Bind(wxEVT_CHAR_HOOK, &MyFrame::OnCharHook, this);
@@ -934,6 +1079,19 @@ void MyFrame::OnSetComPort(wxCommandEvent& event)
         myRadio->comPort, 1, 255, this);
     if (port == -1) return;
     myRadio->comPort = (int)port;
+}
+
+void MyFrame::OnMyCallsign(wxCommandEvent& event)
+{
+    wxString call = wxGetTextFromUser(
+        _("Enter your station callsign:"),
+        _("My Callsign"),
+        m_myCallsign, this);
+    if (call.IsEmpty()) return;
+    m_myCallsign = call.Upper();
+    strncpy_s(myRadio->myCallsign, sizeof(myRadio->myCallsign),
+              m_myCallsign.ToStdString().c_str(), _TRUNCATE);
+    myRadio->SaveSettings("settings.json");
 }
 
 void MyFrame::OnSweepOpen(wxCommandEvent& event)  {
@@ -1080,16 +1238,17 @@ void MyFrame::OnTimer(wxTimerEvent& event)
 
 void MyFrame::B1Click(wxCommandEvent& event) // CONNECT
 {
+    if (myRadio->LoadSettings("settings.json"))
+    {
+        m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
+        m_myCallsign = wxString(myRadio->myCallsign, wxConvUTF8);
+    }
+
     int retval = myRadio->Connect();
 
     if (retval)
     {
         m_button1->SetLabelText(_(" CONNECTED "));
-        if (myRadio->LoadSettings("settings.json"))
-        {
-            m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
-            m_myCallsign = wxString(myRadio->myCallsign, wxConvUTF8);
-        }
     }
 
     m_panel1->Refresh(false);
@@ -1178,6 +1337,12 @@ void MyFrame::BLogClick(wxCommandEvent& event)
     dlg->Show(true);
 }
 
+void MyFrame::BViewLogClick(wxCommandEvent& event)
+{
+    LogViewDialog* dlg = new LogViewDialog(this);
+    dlg->Show(true);
+}
+
 void MyFrame::OnCharHook(wxKeyEvent& event)
 {
     if (SPtoTX)
@@ -1187,8 +1352,22 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
         if (key == 'R') { myRadio->myStatus->mode = RX_MODE; return; }
         if (key == WXK_RIGHT) { wxCommandEvent dummy; B8Click(dummy); return; }
         if (key == WXK_LEFT)  { wxCommandEvent dummy; B7Click(dummy); return; }
+        if (key == WXK_UP || key == WXK_DOWN)
+        {
+            double fine = myRadio->stepSize / 10.0 / 1.0e6;
+            myRadio->LOfreq += (key == WXK_UP) ? fine : -fine;
+            myRadio->LOfreq = round(myRadio->LOfreq * 100000.0) / 100000.0;
+            if (myRadio->LOfreq < 14.150) myRadio->LOfreq = 14.150;
+            if (myRadio->LOfreq > 14.347) myRadio->LOfreq = 14.347;
+            m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
+            myRadio->NewLOFreq = true;
+            myRadio->myStatus->UpdateText = true;
+            return;
+        }
     }
-    if (event.GetKeyCode() == 'L') { wxCommandEvent dummy; BLogClick(dummy); return; }
+    int key = event.GetKeyCode();
+    if (key == 'L') { wxCommandEvent dummy; BLogClick(dummy); return; }
+    if (key == 'S') { wxCommandEvent dummy; BSyncClick(dummy); return; }
     event.Skip();
 }
 

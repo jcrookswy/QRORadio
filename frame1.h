@@ -110,6 +110,7 @@ enum {
     ID_AUDIO_MAX_MIC_GAIN,
     ID_AUDIO_CESSB_SETPOINT,
     ID_PLOT_SETTINGS,
+    ID_MY_CALLSIGN,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -132,6 +133,7 @@ protected:
     wxButton* m_button10;
     wxButton* m_button11;
     wxButton* m_buttonSync;
+    wxButton* m_buttonViewLog;
     wxSlider* m_slider1;
     wxTextCtrl* m_textCtrl1;
     wxTextCtrl* m_textCtrl2;
@@ -175,8 +177,10 @@ public:
     void OnAudioMaxMicGain(wxCommandEvent& event);
     void OnAudioCESSBSetpoint(wxCommandEvent& event);
     void OnPlotSettings(wxCommandEvent& event);
+    void OnMyCallsign(wxCommandEvent& event);
     void BLogClick(wxCommandEvent& event);
     void BSyncClick(wxCommandEvent& event);
+    void BViewLogClick(wxCommandEvent& event);
     void UpdateDebugText(char* text);
 
     CRadio*   myRadio;
@@ -184,6 +188,10 @@ public:
     bool      antTuneRun;
     wxString  RemoteCallsign;
     wxString  m_myCallsign;
+    bool      m_potaChecked = false;
+    wxString  m_potaPark;
+    bool      m_p2pChecked = false;
+    wxString  m_p2pPark;
     wxDECLARE_EVENT_TABLE();
 
 };

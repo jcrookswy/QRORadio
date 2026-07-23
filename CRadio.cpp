@@ -1704,7 +1704,7 @@ int CRadio::Connect()
     fscanf_s(f, "%d", &port);
     port = 5; //DEBUG
     fscanf_s(f, "%d", &AudioInputChannels);
-    fscanf_s(f, "%f", &LOfreq);
+ //   fscanf_s(f, "%f", &LOfreq);
     fscanf_s(f, "%d", &RelaySettings);
     comPort = port;
     fclose(f);
