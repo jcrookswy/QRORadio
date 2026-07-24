@@ -112,6 +112,7 @@ enum {
     ID_PLOT_SETTINGS,
     ID_MY_CALLSIGN,
     ID_IMAGE_REJECT,
+    ID_CW_MODE,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -180,6 +181,7 @@ public:
     void OnPlotSettings(wxCommandEvent& event);
     void OnMyCallsign(wxCommandEvent& event);
     void OnImageReject(wxCommandEvent& event);
+    void OnCWMode(wxCommandEvent& event);
     void BLogClick(wxCommandEvent& event);
     void BSyncClick(wxCommandEvent& event);
     void BViewLogClick(wxCommandEvent& event);

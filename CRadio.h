@@ -126,6 +126,31 @@ public:
 	float IQCorrBeta;     // adaptive RX I/Q phase/skew-balance correction (wideband, pre-tune)
 	bool  IQBalanceEnabled; // user toggle (Radio > Image Reject menu)
 
+	bool CWModeEnabled; // user toggle (Radio > CW Mode menu): narrows RX audio to ~100 Hz around 700 Hz and decodes CW to text
+
+	// CW narrowband bandpass filter state - two cascaded identical biquads (RBJ constant-peak-gain
+	// bandpass, f0=700 Hz, Q=7 -> ~100 Hz wide) run in series for steeper skirts than a single stage
+	float cwBPF1_x1, cwBPF1_x2, cwBPF1_y1, cwBPF1_y2;
+	float cwBPF2_x1, cwBPF2_x2, cwBPF2_y1, cwBPF2_y2;
+
+	// CW envelope + timing decode state
+	float cwEnvelope;      // rectified/smoothed tone envelope
+	float cwNoiseFloor;    // adaptive floor the mark/space threshold is relative to
+	bool  cwMarkState;     // true while the tracked tone is currently "on"
+	int   cwStateHopCount; // consecutive DoRXDSP hops spent in the current mark/space state
+	float cwDotUnitMs;     // adaptive estimate of one Morse "dot" duration, in ms
+	char  cwPattern[16];   // accumulated dot/dash pattern for the character in progress
+	int   cwPatternLen;
+
+	char  CWDecodeText[128]; // scrolling decoded CW text shown in the UI
+	int   CWDecodeLen;
+
+	void ApplyCWBandpass(Ipp32f* buf, int n);
+	void DoCWDecode(Ipp32f* buf, int n);
+	void AppendCWText(const char* s);
+	void ResolveCWCharacter();
+	void ResetCWDecoder();
+
 	Ipp32f* MagData ;
 	Ipp32f* MagMinAccumData;
 	Ipp32f* MagAccumData;

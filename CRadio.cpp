@@ -226,6 +226,9 @@ CRadio::CRadio()
     IQBalanceEnabled = true;
     memset(myCallsign, 0, sizeof(myCallsign));
 
+    CWModeEnabled = false;
+    ResetCWDecoder();
+
     audioInBuf = new Ipp32f[16384];
     audioOutBuf = new Ipp32f[16384];
     resampledAudioOut = new Ipp32f[8192];
@@ -548,6 +551,15 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
 	//Generate 256 samples audio
     for (int i = 0; i < 256; i++) RawAudio[i] = IFFTAccum[i].re; // Audio in real portion?
 
+    // CW mode: narrow the RX audio itself to ~100 Hz around 700 Hz (so the operator hears the
+    // narrowed CW filter) and decode the same narrowed tone to text. Runs before the ALC block so
+    // the ALC reacts to the narrowed CW tone level rather than the full SSB passband.
+    if (CWModeEnabled)
+    {
+        ApplyCWBandpass(RawAudio, 256);
+        DoCWDecode(RawAudio, 256);
+    }
+
     //ALC
     Ipp32f MaxAudio = 0;
     Ipp32f FabsRawAudio = 0.0;
@@ -597,6 +609,159 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
     ippsZero_32fc(&IFFTAccum[128], 256); // Clear the rest
 
 }
+
+// One RBJ constant-peak-gain bandpass biquad, f0=700 Hz, Q=7 (~100 Hz wide) at the 48 kHz audio
+// rate RawAudio/audioOutBuf run at. Applied twice in series (see ApplyCWBandpass) for steeper
+// skirts, the same way the TX path already cascades separate HPF/LPF biquads.
+static inline float CWBiquadStep(float in, float& x1, float& x2, float& y1, float& y2)
+{
+    // w0 = 2*pi*700/48000, Q = 7 (RBJ constant-peak-gain bandpass, normalized by a0)
+    const float b0 =  0.0064933902f;
+    const float b1 =  0.0f;
+    const float b2 = -0.0064933902f;
+    const float a1 = -1.9786775552f;
+    const float a2 =  0.9870132196f;
+
+    float out = b0 * in + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = in;
+    y2 = y1; y1 = out;
+    return out;
+}
+
+void CRadio::ApplyCWBandpass(Ipp32f* buf, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        float s = CWBiquadStep(buf[i], cwBPF1_x1, cwBPF1_x2, cwBPF1_y1, cwBPF1_y2);
+        s       = CWBiquadStep(s,      cwBPF2_x1, cwBPF2_x2, cwBPF2_y1, cwBPF2_y2);
+        buf[i]  = s;
+    }
+}
+
+struct MorseTableEntry { const char* code; const char* text; };
+static const MorseTableEntry kMorseTable[] = {
+    {".-","A"},{"-...","B"},{"-.-.","C"},{"-..","D"},{".","E"},
+    {"..-.","F"},{"--.","G"},{"....","H"},{"..","I"},{".---","J"},
+    {"-.-","K"},{".-..","L"},{"--","M"},{"-.","N"},{"---","O"},
+    {".--.","P"},{"--.-","Q"},{".-.","R"},{"...","S"},{"-","T"},
+    {"..-","U"},{"...-","V"},{".--","W"},{"-..-","X"},{"-.--","Y"},{"--..","Z"},
+    {"-----","0"},{".----","1"},{"..---","2"},{"...--","3"},{"....-","4"},
+    {".....","5"},{"-....","6"},{"--...","7"},{"---..","8"},{"----.","9"},
+    {".-.-.-","."},{"--..--",","},{"..--..","?"},{"-..-.","/"},
+    // Prosigns are keyed as one continuous element run (no inter-character gap), so they land
+    // here as ordinary "characters" - bracketed per user request so they read distinctly from text.
+    {".-.-.","[AR]"},{"...-.-","[SK]"},{"-...-","[BT]"},{"-.--.","[KN]"},{".-...","[AS]"},
+};
+
+void CRadio::AppendCWText(const char* s)
+{
+    int addLen = (int)strlen(s);
+    int cap = (int)sizeof(CWDecodeText) - 1; // leave room for the null terminator
+    if (addLen > cap) { s += (addLen - cap); addLen = cap; } // shouldn't happen, but stay safe
+    if (CWDecodeLen + addLen > cap)
+    {
+        int drop = CWDecodeLen + addLen - cap;
+        memmove(CWDecodeText, CWDecodeText + drop, CWDecodeLen - drop);
+        CWDecodeLen -= drop;
+    }
+    memcpy(CWDecodeText + CWDecodeLen, s, addLen);
+    CWDecodeLen += addLen;
+    CWDecodeText[CWDecodeLen] = '\0';
+}
+
+void CRadio::ResolveCWCharacter()
+{
+    if (cwPatternLen == 0) return;
+    cwPattern[cwPatternLen] = '\0';
+
+    const char* text = "?"; // unrecognized pattern - still show that something was decoded
+    for (const MorseTableEntry& e : kMorseTable)
+    {
+        if (strcmp(e.code, cwPattern) == 0) { text = e.text; break; }
+    }
+    AppendCWText(text);
+    cwPatternLen = 0;
+}
+
+void CRadio::ResetCWDecoder()
+{
+    cwBPF1_x1 = cwBPF1_x2 = cwBPF1_y1 = cwBPF1_y2 = 0.0f;
+    cwBPF2_x1 = cwBPF2_x2 = cwBPF2_y1 = cwBPF2_y2 = 0.0f;
+    cwEnvelope = 0.0f;
+    cwNoiseFloor = 1.0e-5f;
+    cwMarkState = false;
+    cwStateHopCount = 0;
+    cwDotUnitMs = 60.0f; // ~20 WPM starting guess; adapts as text comes in
+    cwPatternLen = 0;
+    CWDecodeLen = 0;
+    CWDecodeText[0] = '\0';
+}
+
+// Called once per DoRXDSP hop (256 samples @ 48 kHz => ~5.33 ms/hop) on the already-bandpassed
+// CW tone. Envelope-follows the tone, runs a hysteresis mark/space detector against an adaptive
+// noise floor, then times the mark/space runs against an adaptive dot-length to classify
+// dot/dash/gap and resolve completed characters via the Morse table.
+void CRadio::DoCWDecode(Ipp32f* buf, int n)
+{
+    const float hopMs = n * 1000.0f / 48000.0f;
+
+    // Envelope: full-wave rectify + ~4 ms single-pole smoothing
+    const float envAlpha = 0.0052f;
+    for (int i = 0; i < n; i++)
+        cwEnvelope += envAlpha * (fabsf(buf[i]) - cwEnvelope);
+
+    // Adaptive noise floor: track downward fast, drift upward slowly
+    if (cwEnvelope < cwNoiseFloor) cwNoiseFloor += 0.05f  * (cwEnvelope - cwNoiseFloor);
+    else                           cwNoiseFloor += 0.0005f * (cwEnvelope - cwNoiseFloor);
+    if (cwNoiseFloor < 1.0e-6f) cwNoiseFloor = 1.0e-6f;
+
+    // Hysteresis: higher threshold to declare a new mark, lower one to release it
+    bool isMark = cwMarkState
+        ? (cwEnvelope > cwNoiseFloor * 2.0f)
+        : (cwEnvelope > cwNoiseFloor * 4.0f);
+
+    if (isMark == cwMarkState)
+    {
+        cwStateHopCount++;
+        return;
+    }
+
+    // State just changed - classify the run that ended using the dot-length estimate so far
+    float durationMs = cwStateHopCount * hopMs;
+
+    if (cwMarkState) // a mark just ended
+    {
+        if (durationMs < cwDotUnitMs * 2.0f)
+        {
+            if (cwPatternLen < (int)sizeof(cwPattern) - 1) cwPattern[cwPatternLen++] = '.';
+            cwDotUnitMs = cwDotUnitMs * 0.7f + durationMs * 0.3f;
+        }
+        else
+        {
+            if (cwPatternLen < (int)sizeof(cwPattern) - 1) cwPattern[cwPatternLen++] = '-';
+            cwDotUnitMs = cwDotUnitMs * 0.9f + (durationMs / 3.0f) * 0.1f;
+        }
+        if (cwDotUnitMs < 20.0f)  cwDotUnitMs = 20.0f;
+        if (cwDotUnitMs > 300.0f) cwDotUnitMs = 300.0f;
+    }
+    else // a space just ended
+    {
+        if (durationMs >= cwDotUnitMs * 6.0f)
+        {
+            ResolveCWCharacter();
+            AppendCWText(" ");
+        }
+        else if (durationMs >= cwDotUnitMs * 2.0f)
+        {
+            ResolveCWCharacter();
+        }
+        // else: intra-character gap, keep accumulating the same character
+    }
+
+    cwMarkState = isMark;
+    cwStateHopCount = 1;
+}
+
 void CRadio::UpdateADCs(char * readData)
 {
     //int dbg_val = 0;
@@ -1383,11 +1548,11 @@ void CRadio::AntTuneDataLoop()
     Sleep(16);
     float minRMAG = 1.0;
 
-    // Phase 1: untuned sweep 14.15-14.35 MHz (21 points), stored at indices 15-35
-    for (int jj = 0; jj < 21; jj++)
+    // Untuned sweep across the full 14.00-14.35 MHz range (36 points, matching the OSL cal table)
+    for (int jj = 0; jj < 36; jj++)
     {
-        int storeIdx = jj + 15;
-        SetFreq(14.15 + jj * 0.01);
+        int storeIdx = jj;
+        SetFreq(14.0 + jj * 0.01);
 
         writeData[0] = 'w';
         WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
@@ -1406,24 +1571,12 @@ void CRadio::AntTuneDataLoop()
         myVNACal->SweptIQMu[storeIdx]                  = m_lastIQMu;
         myStatus->UpdateVSWR = true;
     }
-    // Backfill 14.00-14.14 (indices 0-14) with the 14.15 measurement
-    for (int k = 0; k < 15; k++)
-    {
-        myStatus->SmithChartUntuned[k * 2]     = myStatus->SmithChartUntuned[30];
-        myStatus->SmithChartUntuned[k * 2 + 1] = myStatus->SmithChartUntuned[31];
-        myStatus->SWRUntuned[k]                 = myStatus->SWRUntuned[15];
-        myVNACal->SweptIQMu[k]                  = myVNACal->SweptIQMu[15];
-    }
-    myStatus->UpdateVSWR = true;
 
-    // Calibration index for lastLO within the 36-point OSL table (14.0-14.35 MHz)
+    // Calibration/store index for lastLO within the 36-point table (14.0-14.35 MHz)
     int tuneCalIdx = (int)round((lastLO - 14.0) / 0.01);
     if (tuneCalIdx < 0)  tuneCalIdx = 0;
     if (tuneCalIdx > 35) tuneCalIdx = 35;
-    // Store index for lastLO within the tuned-sweep results (14.15-14.35 MHz, indices 15-35)
-    int tuneStoreIdx = (int)round((lastLO - 14.15) / 0.01) + 15;
-    if (tuneStoreIdx < 15) tuneStoreIdx = 15;
-    if (tuneStoreIdx > 35) tuneStoreIdx = 35;
+    int tuneStoreIdx = tuneCalIdx;
 
     if (myStatus->calMode == 3)
     {
@@ -1451,7 +1604,7 @@ void CRadio::AntTuneDataLoop()
             myStatus->UpdateVSWR = true;
         }
 
-        // Phase 3: tuned sweep 14.15-14.35 MHz at best relay setting, stored at indices 15-35
+        // Phase 3: tuned sweep across the full 14.00-14.35 MHz range at the best relay setting
         RelaySettings = bestRelaySetting;
         writeData[0] = 'c';
         writeData[1] = 0x20 + RelaySettings;
@@ -1459,10 +1612,10 @@ void CRadio::AntTuneDataLoop()
         WriteFile(hSerial, writeData, 3, &bytesWritten, NULL);
         Sleep(16);
 
-        for (int jj = 0; jj < 21; jj++)
+        for (int jj = 0; jj < 36; jj++)
         {
-            int storeIdx = jj + 15;
-            SetFreq(14.15 + jj * 0.01);
+            int storeIdx = jj;
+            SetFreq(14.0 + jj * 0.01);
 
             writeData[0] = 'w';
             WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
@@ -1480,14 +1633,6 @@ void CRadio::AntTuneDataLoop()
             myStatus->SWRTuned[storeIdx]                 = (1.0f + Rmag) / (1.0f - Rmag);
             myStatus->UpdateVSWR = true;
         }
-        // Backfill 14.00-14.14 (indices 0-14) with the 14.15 measurement
-        for (int k = 0; k < 15; k++)
-        {
-            myStatus->SmithChartTuned[k * 2]     = myStatus->SmithChartTuned[30];
-            myStatus->SmithChartTuned[k * 2 + 1] = myStatus->SmithChartTuned[31];
-            myStatus->SWRTuned[k]                 = myStatus->SWRTuned[15];
-        }
-        myStatus->UpdateVSWR = true;
 
         sprintf_s(dbgText, "TUNE %d %.2f", bestRelaySetting, myStatus->SWRTuned[tuneStoreIdx]);
     }
@@ -1724,8 +1869,8 @@ int CRadio::SetFreq(double freqMHz)
 {
     char writeData[8];
     DWORD bytesWritten = 0;
-    if (freqMHz < 14.150) freqMHz = 14.150;
-    if (freqMHz > 14.347) freqMHz = 14.347;
+    if (freqMHz < 14.000) freqMHz = 14.000;
+    if (freqMHz > 14.350) freqMHz = 14.350;
     LOfreq = freqMHz;
     m_iFreq = (int)round(LOfreq * 1000000.0);
     writeData[0] = 'f';
@@ -1734,6 +1879,13 @@ int CRadio::SetFreq(double freqMHz)
     writeData[3] = 0x20 + ((m_iFreq >> 6) & 0x3F);
     writeData[4] = 0x20 + ((m_iFreq) & 0x3F);
     WriteFile(hSerial, writeData, 5, &bytesWritten, NULL); // Set frequency
+
+    //Compute PWM settings
+//    int pwmval = int(2400.0 / freqMHz) - 0x60;
+    //int pwmval = 169 - 0x60;
+    //writeData[0] = 'p';
+    //writeData[1] = pwmval;
+    //WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); // Set frequency
     return bytesWritten;
 }
 

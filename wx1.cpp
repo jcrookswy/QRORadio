@@ -290,6 +290,50 @@ void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, f
     dc.DestroyClippingRegion();
 }
 
+// Same panel chrome as Plot(), but shows scrolling decoded CW text instead of a graph.
+// Wraps at a fixed character count (monospace font, so this is a good enough estimate) and
+// only draws as many trailing lines as fit the box - i.e. it behaves like a ticker.
+void DrawCWText(wxDC& dc, int xofs, int yofs, int xsize, int ysize, const char* text, wchar_t* label)
+{
+    dc.SetBrush(wxBrush(wxColor(64, 64, 64)));
+    dc.SetPen(wxPen(wxColor(96, 96, 96), 3));
+    dc.DrawRectangle(xofs, yofs, xsize, ysize);
+    dc.SetPen(wxPen(wxColor(32, 32, 32), 3));
+    dc.DrawLine(xofs, yofs + ysize, xofs + xsize, yofs + ysize);
+    dc.DrawLine(xofs + xsize, yofs, xofs + xsize, yofs + ysize);
+
+    dc.SetTextForeground(wxColor(255, 255, 0));
+    dc.DrawText(label, xofs + 6, yofs + 4);
+
+    wxCoord charW, charH;
+    dc.GetTextExtent(_T("M"), &charW, &charH);
+    if (charW < 1) charW = 1;
+    int lineH = charH + 2;
+    int charsPerLine = (xsize - 12) / charW;
+    if (charsPerLine < 4) charsPerLine = 4;
+
+    int textTop = yofs + 4 + lineH;
+    int maxLines = (yofs + ysize - textTop) / lineH;
+    if (maxLines < 1) maxLines = 1;
+
+    wxString full(text, wxConvUTF8);
+    int totalChars = (int)full.length();
+    int charsShown = charsPerLine * maxLines;
+    int startChar = (totalChars > charsShown) ? (totalChars - charsShown) : 0;
+
+    dc.SetTextForeground(wxColor(0, 255, 0));
+    int y = textTop;
+    for (int line = 0; line < maxLines; line++)
+    {
+        int lineStart = startChar + line * charsPerLine;
+        if (lineStart >= totalChars) break;
+        int lineLen = charsPerLine;
+        if (lineStart + lineLen > totalChars) lineLen = totalChars - lineStart;
+        dc.DrawText(full.Mid(lineStart, lineLen), xofs + 6, y);
+        y += lineH;
+    }
+}
+
 void Plot2(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, float* data, float ymin, float ymax, int hgrat, int ygrat, wchar_t* text, float* data2)
 {
     Plot(dc, xofs, yofs, xsize, ysize, numElements, data, ymin, ymax, hgrat, ygrat, text);
@@ -451,21 +495,29 @@ void BasicDrawPane::render(wxDC& dc)
     if (VSWRModified)
     {
         VSWRModified = false;
-        wchar_t plot1Label[36] = _T("VSWR 14.15-14.35 MHz 0.5/");
-        Plot2(dc, x3, midY, plotW, midH, 21, &pRadio->myStatus->SWRUntuned[15], 1.0, 3.0, 4, 7, plot1Label, &pRadio->myStatus->SWRTuned[15]);
+        wchar_t plot1Label[36] = _T("VSWR 14.00-14.35 MHz 0.5/");
+        Plot2(dc, x3, midY, plotW, midH, 36, &pRadio->myStatus->SWRUntuned[0], 1.0, 3.0, 4, 7, plot1Label, &pRadio->myStatus->SWRTuned[0]);
 
         wchar_t plot8Label[24] = _T("Antenna Impedance");
-        SmithPlot2(dc, x4, midY, smithW, midH, 21, &pRadio->myStatus->SmithChartUntuned[30], &pRadio->myStatus->SmithChartTuned[30], plot8Label);
+        SmithPlot2(dc, x4, midY, smithW, midH, 36, &pRadio->myStatus->SmithChartUntuned[0], &pRadio->myStatus->SmithChartTuned[0], plot8Label);
     }
 
     if (audioModified)
     {
         audioModified = false;
-        wchar_t plot3Label[20] = _T("Audio (freq) 1kHz/");
-        Plot(dc, x1, midY, plotW, midH, 16, pRadio->myStatus->AudioFreqPlot, 0.0, 1.0, 4, 3, plot3Label);
+        if (pRadio->CWModeEnabled )
+        {
+            wchar_t cwLabel[24] = _T("CW Decode (700 Hz)");
+            DrawCWText(dc, x1, midY, plotW + gap + plotW, midH, pRadio->CWDecodeText, cwLabel);
+        }
+        else
+        {
+            wchar_t plot3Label[20] = _T("Audio (freq) 1kHz/");
+            Plot(dc, x1, midY, plotW, midH, 16, pRadio->myStatus->AudioFreqPlot, 0.0, 1.0, 4, 3, plot3Label);
 
-        wchar_t plot4Label[20] = _T("Audio (time) 1ms/");
-        Plot(dc, x2, midY, plotW, midH, 128, pRadio->myStatus->AudioTimePlot, -1.0, 1.0, 4, 5, plot4Label);
+            wchar_t plot4Label[20] = _T("Audio (time) 1ms/");
+            Plot(dc, x2, midY, plotW, midH, 128, pRadio->myStatus->AudioTimePlot, -1.0, 1.0, 4, 5, plot4Label);
+        }
     }
 
     if (RFModified)
@@ -831,6 +883,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->AppendSeparator();
     radioMenu->AppendCheckItem(ID_IMAGE_REJECT, _("Image &Reject"));
     radioMenu->Check(ID_IMAGE_REJECT, true);
+    radioMenu->AppendCheckItem(ID_CW_MODE, _("&CW Mode (700 Hz)"));
     radioMenu->AppendSeparator();
     radioMenu->Append(ID_PLOT_SETTINGS, _("&Plot Settings..."));
     menuBar->Append(radioMenu, _("&Radio"));
@@ -844,6 +897,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnSetComPort,  this, ID_RADIO_SET_COM);
     Bind(wxEVT_MENU, &MyFrame::OnMyCallsign,  this, ID_MY_CALLSIGN);
     Bind(wxEVT_MENU, &MyFrame::OnImageReject,  this, ID_IMAGE_REJECT);
+    Bind(wxEVT_MENU, &MyFrame::OnCWMode,       this, ID_CW_MODE);
     Bind(wxEVT_MENU, &MyFrame::OnSweepOpen,  this, ID_SWEEP_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepShort, this, ID_SWEEP_SHORT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
@@ -1131,6 +1185,12 @@ void MyFrame::OnImageReject(wxCommandEvent& event)
     myRadio->IQBalanceEnabled = event.IsChecked();
 }
 
+void MyFrame::OnCWMode(wxCommandEvent& event)
+{
+    myRadio->CWModeEnabled = event.IsChecked();
+    myRadio->ResetCWDecoder(); // clear stale filter/timing state on either transition
+}
+
 void MyFrame::OnSweepOpen(wxCommandEvent& event)  {
     myRadio->myStatus->calMode = 0;
     myRadio->myStatus->mode = 3;
@@ -1326,8 +1386,8 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     wxString value = m_textCtrl1->GetValue();
     double freq;
     value.ToDouble(&freq);
-    if (freq < 14.150) freq = 14.150;
-    if (freq > 14.347) freq = 14.347;
+    if (freq < 14.000) freq = 14.000;
+    if (freq > 14.350) freq = 14.350;
     myRadio->LOfreq = freq;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
@@ -1338,7 +1398,7 @@ void MyFrame::B7Click(wxCommandEvent& event) // Step down
 {
     myRadio->LOfreq -= myRadio->stepSize / 1.0e6;
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
-    if (myRadio->LOfreq < 14.150) myRadio->LOfreq = 14.150;
+    if (myRadio->LOfreq < 14.000) myRadio->LOfreq = 14.000;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
@@ -1348,7 +1408,7 @@ void MyFrame::B8Click(wxCommandEvent& event) // Step up
 {
     myRadio->LOfreq += myRadio->stepSize / 1.0e6;
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
-    if (myRadio->LOfreq > 14.347) myRadio->LOfreq = 14.347;
+    if (myRadio->LOfreq > 14.350) myRadio->LOfreq = 14.350;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
@@ -1394,8 +1454,8 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
             double fine = myRadio->stepSize / 10.0 / 1.0e6;
             myRadio->LOfreq += (key == WXK_UP) ? fine : -fine;
             myRadio->LOfreq = round(myRadio->LOfreq * 100000.0) / 100000.0;
-            if (myRadio->LOfreq < 14.150) myRadio->LOfreq = 14.150;
-            if (myRadio->LOfreq > 14.347) myRadio->LOfreq = 14.347;
+            if (myRadio->LOfreq < 14.000) myRadio->LOfreq = 14.000;
+            if (myRadio->LOfreq > 14.350) myRadio->LOfreq = 14.350;
             m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
             myRadio->NewLOFreq = true;
             myRadio->myStatus->UpdateText = true;
