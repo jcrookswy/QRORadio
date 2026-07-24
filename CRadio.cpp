@@ -649,8 +649,8 @@ static const MorseTableEntry kMorseTable[] = {
     {".....","5"},{"-....","6"},{"--...","7"},{"---..","8"},{"----.","9"},
     {".-.-.-","."},{"--..--",","},{"..--..","?"},{"-..-.","/"},
     // Prosigns are keyed as one continuous element run (no inter-character gap), so they land
-    // here as ordinary "characters" - bracketed per user request so they read distinctly from text.
-    {".-.-.","[AR]"},{"...-.-","[SK]"},{"-...-","[BT]"},{"-.--.","[KN]"},{".-...","[AS]"},
+    // here as ordinary "characters" - angle-bracketed per user request so they read distinctly from text.
+    {".-.-.","<AR>"},{"...-.-","<SK>"},{"-...-","<BT>"},{"-.--.","<KN>"},{".-...","<AS>"},
 };
 
 void CRadio::AppendCWText(const char* s)
