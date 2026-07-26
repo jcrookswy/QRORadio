@@ -113,6 +113,8 @@ enum {
     ID_MY_CALLSIGN,
     ID_IMAGE_REJECT,
     ID_CW_MODE,
+    ID_CW_SQUELCH,
+    ID_CW_HYSTERESIS,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -136,6 +138,7 @@ protected:
     wxButton* m_button11;
     wxButton* m_buttonSync;
     wxButton* m_buttonViewLog;
+    wxButton* m_buttonCWPeak;
     wxSlider* m_slider1;
     wxTextCtrl* m_textCtrl1;
     wxTextCtrl* m_textCtrl2;
@@ -182,9 +185,12 @@ public:
     void OnMyCallsign(wxCommandEvent& event);
     void OnImageReject(wxCommandEvent& event);
     void OnCWMode(wxCommandEvent& event);
+    void OnCWSquelch(wxCommandEvent& event);
+    void OnCWHysteresis(wxCommandEvent& event);
     void BLogClick(wxCommandEvent& event);
     void BSyncClick(wxCommandEvent& event);
     void BViewLogClick(wxCommandEvent& event);
+    void BCWPeakClick(wxCommandEvent& event);
     void UpdateDebugText(char* text);
 
     CRadio*   myRadio;
@@ -196,6 +202,7 @@ public:
     wxString  m_potaPark;
     bool      m_p2pChecked = false;
     wxString  m_p2pPark;
+    wxString  m_cwMemory[4]; // CW send-dialog canned messages; in-memory only, lives for the app session (see CWSendDialog)
     wxDECLARE_EVENT_TABLE();
 
 };

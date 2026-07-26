@@ -290,10 +290,10 @@ void Plot(wxDC& dc, int xofs, int yofs, int xsize, int ysize, int numElements, f
     dc.DestroyClippingRegion();
 }
 
-// Same panel chrome as Plot(), but shows scrolling decoded CW text instead of a graph.
-// Wraps at a fixed character count (monospace font, so this is a good enough estimate) and
-// only draws as many trailing lines as fit the box - i.e. it behaves like a ticker.
-void DrawCWText(wxDC& dc, int xofs, int yofs, int xsize, int ysize, const char* text, wchar_t* label)
+// Same panel chrome as the old DrawCWText, but shows CRadio::kCWMaxSlicers stacked single-line
+// rows, one per CW FFT slicer: a frequency label ("701 Hz" / "--- Hz" if never used) followed by
+// that slicer's trailing decoded text (ticker-style - only the tail that fits is shown).
+void DrawCWSlicerRows(wxDC& dc, int xofs, int yofs, int xsize, int ysize, CRadio* pRadio, wchar_t* label)
 {
     dc.SetBrush(wxBrush(wxColor(64, 64, 64)));
     dc.SetPen(wxPen(wxColor(96, 96, 96), 3));
@@ -309,28 +309,92 @@ void DrawCWText(wxDC& dc, int xofs, int yofs, int xsize, int ysize, const char* 
     dc.GetTextExtent(_T("M"), &charW, &charH);
     if (charW < 1) charW = 1;
     int lineH = charH + 2;
-    int charsPerLine = (xsize - 12) / charW;
-    if (charsPerLine < 4) charsPerLine = 4;
 
     int textTop = yofs + 4 + lineH;
-    int maxLines = (yofs + ysize - textTop) / lineH;
-    if (maxLines < 1) maxLines = 1;
+    const int kRows = CRadio::kCWMaxSlicers;
+    const int kHistoryRows = 4; // 2 rows of 8 mark lengths + 2 rows of 8 space lengths
+    int rowH = (yofs + ysize - textTop) / (kRows + kHistoryRows);
+    if (rowH < lineH) rowH = lineH;
 
-    wxString full(text, wxConvUTF8);
-    int totalChars = (int)full.length();
-    int charsShown = charsPerLine * maxLines;
-    int startChar = (totalChars > charsShown) ? (totalChars - charsShown) : 0;
+    const float kCWBinHz = 48000.0f / CRadio::kCWFFTSize;
 
-    dc.SetTextForeground(wxColor(0, 255, 0));
-    int y = textTop;
-    for (int line = 0; line < maxLines; line++)
+    for (int i = 0; i < kRows; i++)
     {
-        int lineStart = startChar + line * charsPerLine;
-        if (lineStart >= totalChars) break;
-        int lineLen = charsPerLine;
-        if (lineStart + lineLen > totalChars) lineLen = totalChars - lineStart;
-        dc.DrawText(full.Mid(lineStart, lineLen), xofs + 6, y);
-        y += lineH;
+        CWSlicer& slicer = pRadio->cwSlicers[i];
+        int y = textTop + i * rowH;
+
+        wchar_t freqLabel[16];
+        if (slicer.used)
+            swprintf_s(freqLabel, _T("%4.0f Hz"), slicer.binIndex * kCWBinHz);
+        else
+            swprintf_s(freqLabel, _T(" --- Hz"));
+
+        dc.SetTextForeground(wxColor(255, 255, 0));
+        dc.DrawText(freqLabel, xofs + 6, y);
+
+        wxCoord freqW, freqH;
+        dc.GetTextExtent(freqLabel, &freqW, &freqH);
+        int textX = xofs + 6 + freqW + charW;
+
+        int charsAvail = (xofs + xsize - 6 - textX) / charW;
+        if (charsAvail < 1) charsAvail = 1;
+
+        wxString full(slicer.text, wxConvUTF8);
+        wxString tail = (full.length() > (size_t)charsAvail)
+            ? full.Mid(full.length() - charsAvail)
+            : full;
+
+        dc.SetTextForeground(wxColor(0, 255, 0));
+        dc.DrawText(tail, textX, y);
+    }
+
+    // Diagnostic rows: smear-corrected mark/space run-length history (in hops) for the most
+    // recently active slicer, so cwSquelch and the mark/space correction can be tuned without
+    // recompiling. "Most recently active" = smallest hopsSinceMark among used slicers.
+    int mostRecent = -1;
+    for (int i = 0; i < kRows; i++)
+    {
+        if (!pRadio->cwSlicers[i].used) continue;
+        if (mostRecent < 0 || pRadio->cwSlicers[i].hopsSinceMark < pRadio->cwSlicers[mostRecent].hopsSinceMark)
+            mostRecent = i;
+    }
+
+    if (mostRecent >= 0)
+    {
+        CWSlicer& slicer = pRadio->cwSlicers[mostRecent];
+        int y = textTop + kRows * rowH;
+        wchar_t line[96];
+
+        const float kCWHopMs = 1000.0f * CRadio::kCWHopSize / 48000.0f;
+
+        dc.SetTextForeground(wxColor(0, 255, 0));
+        for (int row = 0; row < 2; row++)
+        {
+            int* v = &slicer.markLengths[row * 8];
+            if (row == 1)
+            {
+                // 9th value: current adaptive dot-length estimate, in hops, for comparison
+                // against the raw mark lengths above it.
+                float dotUnitHops = slicer.dotUnitMs / kCWHopMs;
+                swprintf_s(line, _T("Marks : %2d %2d %2d %2d %2d %2d %2d %2d %.1f"),
+                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], dotUnitHops);
+            }
+            else
+            {
+                swprintf_s(line, _T("Marks : %2d %2d %2d %2d %2d %2d %2d %2d"),
+                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+            }
+            dc.DrawText(line, xofs + 6, y);
+            y += rowH;
+        }
+        for (int row = 0; row < 2; row++)
+        {
+            int* v = &slicer.spaceLengths[row * 8];
+            swprintf_s(line, _T("Spaces: %2d %2d %2d %2d %2d %2d %2d %2d"),
+                v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+            dc.DrawText(line, xofs + 6, y);
+            y += rowH;
+        }
     }
 }
 
@@ -507,8 +571,8 @@ void BasicDrawPane::render(wxDC& dc)
         audioModified = false;
         if (pRadio->CWModeEnabled )
         {
-            wchar_t cwLabel[24] = _T("CW Decode (700 Hz)");
-            DrawCWText(dc, x1, midY, plotW + gap + plotW, midH, pRadio->CWDecodeText, cwLabel);
+            wchar_t cwLabel[24] = _T("CW Decode (200-2800 Hz)");
+            DrawCWSlicerRows(dc, x1, midY, plotW + gap + plotW, midH, pRadio, cwLabel);
         }
         else
         {
@@ -859,6 +923,85 @@ private:
 
 ///////////////////////////////////////////////////////////////////////////
 
+// Modeless CW send dialog: the top field/SEND button is the message actually keyed; the 4
+// preset rows are just canned-text memories whose COPY button loads them into the top field
+// (nothing is transmitted until SEND is pressed). Presets live in MyFrame::m_cwMemory for the
+// life of the app - loaded into the fields on open, written back on close.
+class CWSendDialog : public wxDialog
+{
+public:
+    CWSendDialog(MyFrame* parent)
+        : wxDialog((wxWindow*)parent, wxID_ANY, _("CW Send"),
+                   wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
+        , m_parent(parent)
+    {
+        wxFlexGridSizer* grid = new wxFlexGridSizer(0, 3, 5, 8);
+        grid->AddGrowableCol(1);
+
+        wxButton* sendBtn = nullptr;
+        {
+            grid->Add(new wxStaticText(this, wxID_ANY, _("Send:")),
+                      0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            m_sendText = new wxTextCtrl(this, wxID_ANY, wxEmptyString,
+                                        wxDefaultPosition, wxSize(260, -1), wxTE_PROCESS_ENTER);
+            m_sendText->SetMaxLength(40);
+            grid->Add(m_sendText, 1, wxEXPAND);
+            sendBtn = new wxButton(this, wxID_ANY, _("SEND"));
+            grid->Add(sendBtn, 0);
+        }
+
+        for (int i = 0; i < 4; i++)
+        {
+            grid->Add(new wxStaticText(this, wxID_ANY, wxString::Format(_("%d:"), i + 1)),
+                      0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            m_preset[i] = new wxTextCtrl(this, wxID_ANY, parent->m_cwMemory[i],
+                                         wxDefaultPosition, wxSize(260, -1));
+            m_preset[i]->SetMaxLength(40);
+            grid->Add(m_preset[i], 1, wxEXPAND);
+
+            wxButton* copyBtn = new wxButton(this, wxID_ANY, _("COPY"));
+            copyBtn->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) {
+                m_sendText->SetValue(m_preset[i]->GetValue());
+                m_sendText->SetFocus();
+                m_sendText->SetInsertionPointEnd();
+            });
+            grid->Add(copyBtn, 0);
+        }
+
+        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(grid, 1, wxEXPAND | wxALL, 12);
+        SetSizer(sizer);
+        Fit();
+
+        m_sendText->SetFocus();
+        m_sendText->Bind(wxEVT_TEXT_ENTER, &CWSendDialog::OnSend, this);
+        sendBtn->Bind(wxEVT_BUTTON, &CWSendDialog::OnSend, this);
+        Bind(wxEVT_CLOSE_WINDOW, &CWSendDialog::OnClose, this);
+    }
+
+private:
+    MyFrame*    m_parent;
+    wxTextCtrl* m_sendText;
+    wxTextCtrl* m_preset[4];
+
+    void SavePresets()
+    {
+        for (int i = 0; i < 4; i++)
+            m_parent->m_cwMemory[i] = m_preset[i]->GetValue();
+    }
+
+    void OnSend(wxCommandEvent&)
+    {
+        wxString text = m_sendText->GetValue();
+        if (text.IsEmpty()) return;
+        m_parent->myRadio->StartCWTransmit(text.ToStdString().c_str());
+    }
+
+    void OnClose(wxCloseEvent&) { SavePresets(); Destroy(); }
+};
+
+///////////////////////////////////////////////////////////////////////////
+
 MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const wxPoint& pos, const wxSize& size, long style) : wxFrame(parent, id, title, pos, size, style)
 {
 
@@ -884,6 +1027,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->AppendCheckItem(ID_IMAGE_REJECT, _("Image &Reject"));
     radioMenu->Check(ID_IMAGE_REJECT, true);
     radioMenu->AppendCheckItem(ID_CW_MODE, _("&CW Mode (700 Hz)"));
+    radioMenu->Append(ID_CW_SQUELCH, _("CW &Squelch..."));
+    radioMenu->Append(ID_CW_HYSTERESIS, _("CW &Hysteresis..."));
     radioMenu->AppendSeparator();
     radioMenu->Append(ID_PLOT_SETTINGS, _("&Plot Settings..."));
     menuBar->Append(radioMenu, _("&Radio"));
@@ -898,6 +1043,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnMyCallsign,  this, ID_MY_CALLSIGN);
     Bind(wxEVT_MENU, &MyFrame::OnImageReject,  this, ID_IMAGE_REJECT);
     Bind(wxEVT_MENU, &MyFrame::OnCWMode,       this, ID_CW_MODE);
+    Bind(wxEVT_MENU, &MyFrame::OnCWSquelch,    this, ID_CW_SQUELCH);
+    Bind(wxEVT_MENU, &MyFrame::OnCWHysteresis, this, ID_CW_HYSTERESIS);
     Bind(wxEVT_MENU, &MyFrame::OnSweepOpen,  this, ID_SWEEP_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepShort, this, ID_SWEEP_SHORT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
@@ -1044,6 +1191,12 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
 
     freqBox->Add(freqGrid, 0, wxALL, 5);
 
+    m_buttonCWPeak = new wxButton(freqParent, wxID_ANY, _("CW Peaking"), wxDefaultPosition, wxSize(180, 32), 0);
+    m_buttonCWPeak->SetFont(bf);
+    m_buttonCWPeak->SetBackgroundColour(kBtnBg);
+    m_buttonCWPeak->SetForegroundColour(kBtnFg);
+    freqBox->Add(m_buttonCWPeak, 0, wxALL | wxALIGN_CENTER_HORIZONTAL, 5);
+
     controlsSizer->Add(freqBox, 0, wxEXPAND | wxALL, 2);
 
     // --- Group: Options ---
@@ -1113,6 +1266,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     m_button11->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BLogClick), NULL, this);
     m_buttonSync->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BSyncClick), NULL, this);
     m_buttonViewLog->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BViewLogClick), NULL, this);
+    m_buttonCWPeak->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(MyFrame::BCWPeakClick), NULL, this);
 
     SPtoTX = true;
     antTuneRun = false;
@@ -1238,6 +1392,36 @@ void MyFrame::OnAudioCESSBSetpoint(wxCommandEvent& event)
         myRadio->agcTarget = (float)pow(10.0, dB / 20.0);
 }
 
+void MyFrame::OnCWSquelch(wxCommandEvent& event)
+{
+    wxString input = wxGetTextFromUser(
+        _("CW FFT decoder squelch multiplier (threshold = median power x this x 9; default 20.0):"),
+        _("CW Squelch"),
+        wxString::Format("%.2f", myRadio->cwSquelch), this);
+    if (input.IsEmpty()) return;
+    double squelch;
+    if (input.ToDouble(&squelch))
+    {
+        if (squelch < 0.1) squelch = 0.1;
+        myRadio->cwSquelch = (float)squelch;
+    }
+}
+
+void MyFrame::OnCWHysteresis(wxCommandEvent& event)
+{
+    wxString input = wxGetTextFromUser(
+        _("CW FFT decoder squelch hysteresis (enter mark above squelch+this, exit mark below squelch-this; default 4.0):"),
+        _("CW Hysteresis"),
+        wxString::Format("%.2f", myRadio->cwHysteresis), this);
+    if (input.IsEmpty()) return;
+    double hysteresis;
+    if (input.ToDouble(&hysteresis))
+    {
+        if (hysteresis < 0.0) hysteresis = 0.0;
+        myRadio->cwHysteresis = (float)hysteresis;
+    }
+}
+
 void MyFrame::OnPlotSettings(wxCommandEvent& event)
 {
     long val;
@@ -1331,6 +1515,12 @@ void MyFrame::OnTimer(wxTimerEvent& event)
     m_panel1->RFModified = true;
     m_panel1->Refresh(false);
 
+    if (myRadio->CWPeakReady)
+    {
+        myRadio->CWPeakReady = false;
+        wxMessageBox(wxString::Format("Peak frequency: %.0f Hz", myRadio->CWPeakFreq),
+                     "CW Peaking", wxOK | wxICON_INFORMATION, this);
+    }
 }
 
 void MyFrame::B1Click(wxCommandEvent& event) // CONNECT
@@ -1367,6 +1557,13 @@ void MyFrame::B3Click(wxCommandEvent& event) // ANT TUNE
 
 void MyFrame::B4Click(wxCommandEvent& event) // TRANSMIT
 {
+    if (myRadio->CWModeEnabled)
+    {
+        CWSendDialog* dlg = new CWSendDialog(this);
+        dlg->Show(true);
+        return;
+    }
+
     myRadio->myStatus->mode = 2;
 }
 
@@ -1379,6 +1576,11 @@ void MyFrame::BSyncClick(wxCommandEvent& event) // SYNC
 {
     myRadio->myStatus->calMode = 6;
     myRadio->myStatus->mode = VNA_MODE;
+}
+
+void MyFrame::BCWPeakClick(wxCommandEvent& event) // CW Peaking
+{
+    myRadio->StartCWPeakCapture();
 }
 
 void MyFrame::B6Click(wxCommandEvent& event) // MHz

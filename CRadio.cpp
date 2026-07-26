@@ -1,15 +1,19 @@
 #include "CRadio.h"
 #include <thread>
 #include <cmath>
+#include <cctype>
 #include <stddef.h>
 #include <ipp.h>
 #include <chrono>
 #include <iostream>
+#include <cstdio>
 //#include "frame1.h"
 
 #define ENABLE_CESSB    // Comment out to bypass CESSB (unprocessed SSB, no envelope clipping)
 
 bool gUseDebugWaveform = false;
+
+void BuildTXPacket(char* wd, Ipp32fc* pIQ); // defined below; used by both TXDataLoop and CWTXDataLoop
 
 
 //void ProcessPlotThread(int id, void* p) {
@@ -79,13 +83,17 @@ static int patestCallback(const void* inputBuffer, void* outputBuffer,
         //for (int i = 0; i < 8; i++) memcpy(&out[i * 64], DummyBuffer, framesPerBuffer * 8);
         //memset(outputBuffer, 0, framesPerBuffer * 8);
     }
-    if (crp->myStatus->mode == 1) // USB RX
+    if (crp->myStatus->mode == RX_MODE) // USB RX
     {
         int IQSamples = crp->IQWriteAddr - crp->IQReadAddr;
         if (crp->IQWriteAddr < crp->IQReadAddr) IQSamples += 16000;
         if ((!crp->audioOutStarted) && (crp->audioOutWrPtr > 4095)) crp->audioOutStarted = true;
     }
-    else // Not in RX mode
+    else if (crp->myStatus->mode == CW_TX_MODE) // CW sidetone - see CWTXDataLoop
+    {
+        if ((!crp->audioOutStarted) && (crp->audioOutWrPtr > 4095)) crp->audioOutStarted = true;
+    }
+    else // Not in RX mode or CW TX - no audio output source running, so don't let stale data play
     {
         crp->audioOutStarted = false;
         crp->audioOutWrPtr = 0;
@@ -227,7 +235,16 @@ CRadio::CRadio()
     memset(myCallsign, 0, sizeof(myCallsign));
 
     CWModeEnabled = false;
+    // NOTE: no longer used by the CW mark/space decision - see the cwSquelch/cwHysteresis
+    // declaration in CRadio.h. Values kept only so the still-present UI dialogs have something to
+    // read/write.
+    cwSquelch = 10.0f;
+    cwHysteresis = 0.1f;
     ResetCWDecoder();
+
+    cwTxDotMs = 60.0f; // TX dot length, ms - hard-coded for now
+    cwSidetoneHz = 700.0f; // matches the "CW Mode (700 Hz)" RX convention - hard-coded for now
+    memset(cwTxMessage, 0, sizeof(cwTxMessage));
 
     audioInBuf = new Ipp32f[16384];
     audioOutBuf = new Ipp32f[16384];
@@ -306,6 +323,73 @@ CRadio::CRadio()
         ippAlgHintAccurate, pFFTSpecBuf, pFFTInitBuf);
     if (pFFTInitBuf) ippFree(pFFTInitBuf);
     // *** FFT is good to go ***
+
+    // CW Peaking: 16384-point (order 14) complex FFT, plus its capture buffer and Hann window
+    CWPeakCapturing = false;
+    CWPeakReady = false;
+    CWPeakSampleCount = 0;
+    CWPeakFreq = 0.0f;
+
+    CWPeakBuffer = ippsMalloc_32f(16384);
+    CWPeakHannWindow = ippsMalloc_32f(16384);
+    for (int i = 0; i < 16384; i++)
+        CWPeakHannWindow[i] = 0.5f - 0.5f * cosf(IPP_2PI * i / 16384);
+    CWPeakFFTData = ippsMalloc_32fc(16384);
+
+    {
+        Ipp8u* pCWPeakFFTInitBuf;
+        int sizeCWPeakFFTSpec, sizeCWPeakFFTInitBuf, sizeCWPeakFFTWorkBuf;
+        ippsFFTGetSize_C_32fc(14, IPP_FFT_DIV_FWD_BY_N,
+            ippAlgHintAccurate, &sizeCWPeakFFTSpec, &sizeCWPeakFFTInitBuf, &sizeCWPeakFFTWorkBuf);
+
+        pCWPeakFFTSpecBuf = ippsMalloc_8u(sizeCWPeakFFTSpec);
+        pCWPeakFFTInitBuf = ippsMalloc_8u(sizeCWPeakFFTInitBuf);
+        pCWPeakFFTWorkBuf = ippsMalloc_8u(sizeCWPeakFFTWorkBuf);
+
+        ippsFFTInit_C_32fc(&pCWPeakFFTSpec, 14, IPP_FFT_DIV_FWD_BY_N,
+            ippAlgHintAccurate, pCWPeakFFTSpecBuf, pCWPeakFFTInitBuf);
+        if (pCWPeakFFTInitBuf) ippFree(pCWPeakFFTInitBuf);
+    }
+
+    // CW multi-tone decode: 8192-point (order 13) complex FFT on a sliding window of wideband
+    // (pre-CW-filter) audio, same IPP FFT setup pattern as CW Peaking above. The window slides
+    // every DoRXDSP hop (~5.33 ms), but the FFT itself (peak search) only runs every kCWPeakHopSize
+    // samples (~85.3 ms) - see FindCWPeak/DoCWFFTDecode.
+    cwFFTSampleWindow = ippsMalloc_32f(kCWFFTSize);
+    cwHannWindow      = ippsMalloc_32f(kCWFFTSize);
+    ippsZero_32f(cwFFTSampleWindow, kCWFFTSize);
+    for (int i = 0; i < kCWFFTSize; i++)
+        cwHannWindow[i] = 0.5f - 0.5f * cosf(IPP_2PI * i / kCWFFTSize);
+    cwFFTData = ippsMalloc_32fc(kCWFFTSize);
+
+    {
+        Ipp8u* pCWFFTInitBuf;
+        int sizeCWFFTSpec, sizeCWFFTInitBuf, sizeCWFFTWorkBuf;
+        ippsFFTGetSize_C_32fc(kCWFFTOrder, IPP_FFT_DIV_FWD_BY_N,
+            ippAlgHintAccurate, &sizeCWFFTSpec, &sizeCWFFTInitBuf, &sizeCWFFTWorkBuf);
+
+        pCWFFTSpecBuf = ippsMalloc_8u(sizeCWFFTSpec);
+        pCWFFTInitBuf = ippsMalloc_8u(sizeCWFFTInitBuf);
+        pCWFFTWorkBuf = ippsMalloc_8u(sizeCWFFTWorkBuf);
+
+        ippsFFTInit_C_32fc(&pCWFFTSpec, kCWFFTOrder, IPP_FFT_DIV_FWD_BY_N,
+            ippAlgHintAccurate, pCWFFTSpecBuf, pCWFFTInitBuf);
+        if (pCWFFTInitBuf) ippFree(pCWFFTInitBuf);
+    }
+
+    // Each slicer's reference-tone correlator buffer is pre-allocated once here (see AssignCWSlicers)
+    // so tracking a tone never allocates memory on the fly. Full kCWFFTSize samples long even though
+    // only kCWHopSize are dot-producted per hop - the tone is generated once per assignment and read
+    // back a slice at a time (toneIndex), never regenerated hop-to-hop.
+    for (int s = 0; s < kCWMaxSlicers; s++)
+        cwSlicers[s].tone = ippsMalloc_32fc(kCWFFTSize);
+
+    // See the cwToneMagn declaration in CRadio.h for why this needs rescaling relative to
+    // FindCWPeak's FFT-derived avgMag: a Hann-windowed, kCWFFTSize-point, /N-normalized FFT bin and
+    // an unwindowed kCWHopSize-sample dot product have very different noise/signal gain, so this
+    // brings the two onto roughly the same order of magnitude (0.375 approximates the Hann window's
+    // mean-square value). Only a starting point - retune cwSquelch/cwHysteresis on air.
+    cwToneMagn = sqrtf(0.375f / ((float)kCWFFTSize * kCWHopSize));
 
 	//Build window
 	for (int i = 0; i < 250; i++)
@@ -551,13 +635,31 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
 	//Generate 256 samples audio
     for (int i = 0; i < 256; i++) RawAudio[i] = IFFTAccum[i].re; // Audio in real portion?
 
-    // CW mode: narrow the RX audio itself to ~100 Hz around 700 Hz (so the operator hears the
-    // narrowed CW filter) and decode the same narrowed tone to text. Runs before the ALC block so
-    // the ALC reacts to the narrowed CW tone level rather than the full SSB passband.
+    // CW Peaking capture: tap the full-bandwidth demodulated audio (before any CW narrowing
+    // below) so the peak search can find a tone anywhere in the 300-1100 Hz range regardless of
+    // whether CW Mode's ~100 Hz filter is engaged.
+    if (CWPeakCapturing)
+    {
+        int room = 16384 - CWPeakSampleCount;
+        int take = (room < 256) ? room : 256;
+        if (take > 0) memcpy(&CWPeakBuffer[CWPeakSampleCount], RawAudio, take * sizeof(Ipp32f));
+        CWPeakSampleCount += take;
+        if (CWPeakSampleCount >= 16384)
+        {
+            RunCWPeakAnalysis();
+            CWPeakCapturing = false;
+            CWPeakReady = true;
+        }
+    }
+
+    // CW mode: the FFT multi-tone decoder reads RawAudio while still wideband (same tap point as
+    // CW Peaking above) so it sees the full 200-2800 Hz band regardless of the narrow listening
+    // filter applied afterward. ApplyCWBandpass then narrows what's actually played back, exactly
+    // as before.
     if (CWModeEnabled)
     {
+        DoCWFFTDecode(RawAudio, 256);
         ApplyCWBandpass(RawAudio, 256);
-        DoCWDecode(RawAudio, 256);
     }
 
     //ALC
@@ -653,113 +755,608 @@ static const MorseTableEntry kMorseTable[] = {
     {".-.-.","<AR>"},{"...-.-","<SK>"},{"-...-","<BT>"},{"-.--.","<KN>"},{".-...","<AS>"},
 };
 
-void CRadio::AppendCWText(const char* s)
+// Re-initializes one slicer to defaults and marks it unused. Called by ResetCWDecoder and by
+// AssignCWSlicers when a slot is (re)assigned to a new tone (caller sets .used/.binIndex after).
+static void ResetCWSlicer(CWSlicer& slicer)
 {
-    int addLen = (int)strlen(s);
-    int cap = (int)sizeof(CWDecodeText) - 1; // leave room for the null terminator
-    if (addLen > cap) { s += (addLen - cap); addLen = cap; } // shouldn't happen, but stay safe
-    if (CWDecodeLen + addLen > cap)
-    {
-        int drop = CWDecodeLen + addLen - cap;
-        memmove(CWDecodeText, CWDecodeText + drop, CWDecodeLen - drop);
-        CWDecodeLen -= drop;
-    }
-    memcpy(CWDecodeText + CWDecodeLen, s, addLen);
-    CWDecodeLen += addLen;
-    CWDecodeText[CWDecodeLen] = '\0';
+    slicer.used = false;
+    slicer.binIndex = -1;
+    slicer.markState = false;
+    slicer.stateHopCount = 0;
+    slicer.resolvedThisSpace = false;
+    slicer.hopsSinceMark = 0;
+    slicer.dotUnitMs = 60.0f; // ~20 WPM starting guess
+    slicer.patternLen = 0;
+    slicer.textLen = 0;
+    slicer.text[0] = '\0';
+    memset(slicer.markLengths, 0, sizeof(slicer.markLengths));
+    memset(slicer.spaceLengths, 0, sizeof(slicer.spaceLengths));
+    slicer.magHistory[0].re = slicer.magHistory[0].im = 0.0f;
+    slicer.magHistory[1].re = slicer.magHistory[1].im = 0.0f;
+    slicer.freqNorm = 0.0f;
+    slicer.toneIndex = 0;
+    memset(slicer.weightedHistory, 0, sizeof(slicer.weightedHistory));
+    slicer.peakMag = 0.0f;
+    slicer.histMinAvg = 0.0f;
+    slicer.histMinAvgInit = false;
 }
 
-void CRadio::ResolveCWCharacter()
+// Shifts a 64-entry weighted-magnitude history left and appends the newest value at the end
+// (oldest first) - same shift-and-append pattern as PushCWHistory below, just float/64 instead of
+// int/16.
+static void PushCWWeightedHistory(float (&history)[64], float value)
 {
-    if (cwPatternLen == 0) return;
-    cwPattern[cwPatternLen] = '\0';
+    memmove(history, history + 1, 63 * sizeof(float));
+    history[63] = value;
+}
 
-    const char* text = "?"; // unrecognized pattern - still show that something was decoded
-    for (const MorseTableEntry& e : kMorseTable)
+// Shifts a 16-entry run-length history left and appends the newest value at the end (oldest first).
+static void PushCWHistory(int (&history)[16], int value)
+{
+    memmove(history, history + 1, 15 * sizeof(int));
+    history[15] = value;
+}
+
+void CRadio::AppendCWSlicerText(CWSlicer& slicer, const char* s)
+{
+    int addLen = (int)strlen(s);
+    int cap = (int)sizeof(slicer.text) - 1;
+    if (addLen > cap) { s += (addLen - cap); addLen = cap; }
+    if (slicer.textLen + addLen > cap)
     {
-        if (strcmp(e.code, cwPattern) == 0) { text = e.text; break; }
+        int drop = slicer.textLen + addLen - cap;
+        memmove(slicer.text, slicer.text + drop, slicer.textLen - drop);
+        slicer.textLen -= drop;
     }
-    AppendCWText(text);
-    cwPatternLen = 0;
+    memcpy(slicer.text + slicer.textLen, s, addLen);
+    slicer.textLen += addLen;
+    slicer.text[slicer.textLen] = '\0';
+}
+
+void CRadio::ResolveCWSlicerCharacter(CWSlicer& slicer)
+{
+    if (slicer.patternLen == 0) return;
+    slicer.pattern[slicer.patternLen] = '\0';
+
+    const char* text = "~";
+    for (const MorseTableEntry& e : kMorseTable)
+        if (strcmp(e.code, slicer.pattern) == 0) { text = e.text; break; }
+
+    AppendCWSlicerText(slicer, text);
+    slicer.patternLen = 0;
 }
 
 void CRadio::ResetCWDecoder()
 {
     cwBPF1_x1 = cwBPF1_x2 = cwBPF1_y1 = cwBPF1_y2 = 0.0f;
     cwBPF2_x1 = cwBPF2_x2 = cwBPF2_y1 = cwBPF2_y2 = 0.0f;
-    cwEnvelope = 0.0f;
-    cwNoiseFloor = 1.0e-5f;
-    cwMarkState = false;
-    cwStateHopCount = 0;
-    cwDotUnitMs = 60.0f; // ~20 WPM starting guess; adapts as text comes in
-    cwPatternLen = 0;
-    CWDecodeLen = 0;
-    CWDecodeText[0] = '\0';
+
+    cwPeakHopAccum = 0;
+    cwPendingPeakBin = -1;
+    // cwSquelch/cwHysteresis are deliberately not touched here - they're user-tunable settings
+    // (Radio > CW Squelch.../CW Hysteresis...) and ResetCWDecoder() now runs on every frequency
+    // retune, which shouldn't wipe out a manually-chosen value. Only ever initialized in the constructor.
+
+    for (int s = 0; s < kCWMaxSlicers; s++)
+        ResetCWSlicer(cwSlicers[s]);
 }
 
-// Called once per DoRXDSP hop (256 samples @ 48 kHz => ~5.33 ms/hop) on the already-bandpassed
-// CW tone. Envelope-follows the tone, runs a hysteresis mark/space detector against an adaptive
-// noise floor, then times the mark/space runs against an adaptive dot-length to classify
-// dot/dash/gap and resolve completed characters via the Morse table.
-void CRadio::DoCWDecode(Ipp32f* buf, int n)
+///////////////////////////////////////////////////////////////////////////
+// CW transmit - see CRadio::CWTXDataLoop for the send side.
+
+// Reverse of kMorseTable: single-character text -> dot/dash code. Prosign entries ("<AR>" etc) are
+// multi-character and intentionally not matched here - typed TX text has no way to enter them yet.
+static const char* CWTxLookup(char c)
 {
-    const float hopMs = n * 1000.0f / 48000.0f;
+    for (const MorseTableEntry& e : kMorseTable)
+        if (e.text[0] == c && e.text[1] == '\0') return e.code;
+    return nullptr;
+}
 
-    // Envelope: full-wave rectify + ~4 ms single-pole smoothing
-    const float envAlpha = 0.0052f;
-    for (int i = 0; i < n; i++)
-        cwEnvelope += envAlpha * (fabsf(buf[i]) - cwEnvelope);
+// Writes (or, if env is null, just measures) samples starting at env[pos]; returns the sample count
+// either way, so the same call sequence sizes the buffer on a first dry-run pass and fills it on a
+// second real pass (see EmitCWTXSequence / CRadio::BuildCWTXEnvelope).
+static int EmitCWGap(Ipp32f* env, int pos, int samples)
+{
+    if (env) ippsZero_32f(env + pos, samples);
+    return samples;
+}
 
-    // Adaptive noise floor: track downward fast, drift upward slowly
-    if (cwEnvelope < cwNoiseFloor) cwNoiseFloor += 0.05f  * (cwEnvelope - cwNoiseFloor);
-    else                           cwNoiseFloor += 0.0005f * (cwEnvelope - cwNoiseFloor);
-    if (cwNoiseFloor < 1.0e-6f) cwNoiseFloor = 1.0e-6f;
-
-    // Hysteresis: higher threshold to declare a new mark, lower one to release it
-    bool isMark = cwMarkState
-        ? (cwEnvelope > cwNoiseFloor * 2.0f)
-        : (cwEnvelope > cwNoiseFloor * 4.0f);
-
-    if (isMark == cwMarkState)
+// A mark (key-down) segment: peakAmp for the whole run, except a taper-sample raised-cosine ramp
+// in at the start and out at the end (0.5-0.5*cos, i.e. half of the same shape CRadio's other Hann
+// windows use). samples is always >> 2*taper here (dot/dash lengths in ms vs a handful of ms taper).
+static int EmitCWMark(Ipp32f* env, int pos, int samples, int taper, float peakAmp)
+{
+    if (env)
     {
-        cwStateHopCount++;
-        return;
+        for (int i = 0; i < samples; i++)
+        {
+            float amp = peakAmp;
+            if (i < taper)
+                amp = peakAmp * (0.5f - 0.5f * cosf((float)IPP_2PI * i / (2.0f * taper)));
+            else if (i >= samples - taper)
+                amp = peakAmp * (0.5f - 0.5f * cosf((float)IPP_2PI * (samples - i) / (2.0f * taper)));
+            env[pos + i] = amp;
+        }
+    }
+    return samples;
+}
+
+// Leader flush + every character's tapered marks (1-unit gaps between elements) + inter-character
+// (3-unit) or, after a space, inter-word (7-unit) gaps + trailer flush. Characters with no Morse
+// mapping (CWTxLookup returns null) are silently dropped instead of breaking the sequence.
+static int EmitCWTXSequence(Ipp32f* env, const char* text, int dotSamples, int taperSamples, int flushSamples, float peakAmp)
+{
+    int pos = 0;
+    pos += EmitCWGap(env, pos, flushSamples); // leader
+
+    bool wordGapPending = false;
+    bool firstChar = true;
+    for (const char* p = text; *p; p++)
+    {
+        char c = (char)toupper((unsigned char)*p);
+        if (c == ' ') { wordGapPending = true; continue; }
+
+        const char* code = CWTxLookup(c);
+        if (!code) continue; // no Morse mapping for this character - skip it
+
+        if (!firstChar)
+            pos += EmitCWGap(env, pos, wordGapPending ? dotSamples * 7 : dotSamples * 3);
+        firstChar = false;
+        wordGapPending = false;
+
+        for (int i = 0; code[i]; i++)
+        {
+            if (i > 0) pos += EmitCWGap(env, pos, dotSamples); // 1-unit intra-character gap
+            int markSamples = (code[i] == '-') ? dotSamples * 3 : dotSamples;
+            pos += EmitCWMark(env, pos, markSamples, taperSamples, peakAmp);
+        }
     }
 
-    // State just changed - classify the run that ended using the dot-length estimate so far
-    float durationMs = cwStateHopCount * hopMs;
+    pos += EmitCWGap(env, pos, flushSamples); // trailer
+    return pos;
+}
 
-    if (cwMarkState) // a mark just ended
+// Builds the full raised-cosine-tapered on/off keyed envelope for text, at 48 kHz, as a real-only
+// (Q always 0 - see CWTXDataLoop) amplitude buffer. Caller owns the returned buffer (ippsFree it).
+Ipp32f* CRadio::BuildCWTXEnvelope(const char* text, int* outSampleCount)
+{
+    int dotSamples = (int)lroundf(cwTxDotMs * 48.0f); // cwTxDotMs is in ms; audio rate is 48 kHz
+
+    int rawTotal = EmitCWTXSequence(nullptr, text, dotSamples, kCWTxTaperSamples, kCWTxFlushSamples, kCWTxPeakAmplitude);
+
+    // Round up to a whole number of 1024-sample resampler blocks (padding with extra trailing
+    // silence) so CWTXDataLoop can always feed ippsResamplePolyphase_32f fixed 1024-sample chunks,
+    // the same block size TXDataLoop already relies on elsewhere.
+    int total = ((rawTotal + 1023) / 1024) * 1024;
+    Ipp32f* env = ippsMalloc_32f(total);
+    ippsZero_32f(env, total);
+    EmitCWTXSequence(env, text, dotSamples, kCWTxTaperSamples, kCWTxFlushSamples, kCWTxPeakAmplitude);
+
+    *outSampleCount = total;
+    return env;
+}
+
+// Called from the UI thread (CWSendDialog's SEND button). Stashes the text and switches to
+// CW_TX_MODE; CRadio::DataThread() picks that up on the background data thread and runs
+// CWTXDataLoop(), which does the actual building and sending.
+void CRadio::StartCWTransmit(const char* text)
+{
+    strncpy_s(cwTxMessage, sizeof(cwTxMessage), text, _TRUNCATE);
+    myStatus->mode = CW_TX_MODE;
+}
+
+// Builds the keyed envelope for cwTxMessage and streams it to the hardware, then returns to RX_MODE.
+// Deliberately skips TXDataLoop's HPF/LPF/AGC/CESSB chain entirely - CW is plain carrier on/off
+// keying (Q is always 0, so BuildTXPacket's phase stays flat and only amplitude moves), not an
+// audio-frequency signal that needs voice-band processing. Still runs through the same LO-locked
+// polyphase resampler (factor tied to LOfreq, exactly as TXDataLoop uses) before BuildTXPacket, so
+// real-world dot timing comes out right regardless of the current LO frequency.
+void CRadio::CWTXDataLoop()
+{
+    char writeData[132]; // 1 header + 32 IQ pairs x 4 bytes = 129 bytes
+    DWORD bytesWritten = 0;
+
+    int envCount = 0;
+    Ipp32f* env = BuildCWTXEnvelope(cwTxMessage, &envCount);
+
+    PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+
+    writeData[0] = 't'; // Transmit mode
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
+    Sleep(32); // Wait for command / relays
+
+    Ipp64f time = 80.0; // matches TXDataLoop's resampler start offset
+    Ipp64f factor = LOfreq * 1000.0 / (48.0 * 256); // same LO-locked rate TXDataLoop resamples to
+    int ResampleOutCount = 0;
+
+    float sidetonePhase = 0.0f;
+    float sidetonePhaseInc = (float)(IPP_2PI * cwSidetoneHz / 48000.0);
+
+    int pos = 0;
+    while (pos < envCount && CW_TX_MODE == myStatus->mode) // abort early if the user hits RECEIVE
     {
-        if (durationMs < cwDotUnitMs * 2.0f)
+        // Sidetone: same envelope shape as the RF path (env[] is still at 48 kHz here, pre-resample),
+        // at an audible pitch instead of DC, written straight into the audioOutBuf ring PortAudio's
+        // output callback plays from - so it comes out the speaker roughly in step with the RF.
+        for (int k = 0; k < 1024; k++)
         {
-            if (cwPatternLen < (int)sizeof(cwPattern) - 1) cwPattern[cwPatternLen++] = '.';
-            cwDotUnitMs = cwDotUnitMs * 0.7f + durationMs * 0.3f;
+            float norm = env[pos + k] / kCWTxPeakAmplitude; // 0..1, independent of RF drive level
+            audioOutBuf[audioOutWrPtr] = norm * kCWSidetoneAmplitude * cosf(sidetonePhase);
+            sidetonePhase += sidetonePhaseInc;
+            if (sidetonePhase >= (float)IPP_2PI) sidetonePhase -= (float)IPP_2PI;
+            audioOutWrPtr++;
+            if (audioOutWrPtr >= 16384) audioOutWrPtr = 0;
+        }
+
+        int newSampleCount = 0;
+        ippsResamplePolyphase_32f(&env[pos], 1024, &resampledAudioOut[ResampleOutCount],
+            factor, 1.0, &time, &newSampleCount, resample_state);
+        // Q is always 0 (plain carrier keying) - no need to actually resample an all-zero array.
+        ippsZero_32f(&resampledAudioOutQ[ResampleOutCount], newSampleCount);
+        ResampleOutCount += newSampleCount;
+        time -= 1024;
+        pos += 1024;
+
+        int sendSampleCount = (ResampleOutCount / 32) * 32;
+        for (int s = 0; s < sendSampleCount; s += 32)
+        {
+            Ipp32fc iq[32];
+            for (int k = 0; k < 32; k++)
+                iq[k] = { resampledAudioOut[s + k], resampledAudioOutQ[s + k] };
+            BuildTXPacket(writeData, iq);
+            WriteFile(hSerial, writeData, 129, &bytesWritten, NULL);
+        }
+
+        // Carry the <32-sample remainder (below one packet's worth) to the front for next time.
+        ippsCopy_32f(&resampledAudioOut[sendSampleCount],  resampledAudioOut,  ResampleOutCount - sendSampleCount);
+        ippsCopy_32f(&resampledAudioOutQ[sendSampleCount], resampledAudioOutQ, ResampleOutCount - sendSampleCount);
+        ResampleOutCount -= sendSampleCount;
+    }
+    // Any final leftover (<32 samples) is dropped - it only ever comes from the tail of the zero
+    // trailer, so there's no real content in it to lose.
+
+    ippsFree(env);
+
+    writeData[0] = 'i';
+    writeData[1] = 'r';
+    WriteFile(hSerial, writeData, 2, &bytesWritten, NULL);
+    myStatus->mode = RX_MODE;
+}
+
+// Slides the kCWFFTSize-sample window by n (always kCWHopSize) samples of wideband pre-filter
+// audio. Called every hop so the window is always current for both FindCWPeak's FFT (every
+// kCWPeakHopSize samples) and every active slicer's tone-correlator (every hop).
+void CRadio::CaptureCWSpectrum(Ipp32f* wideband, int n)
+{
+    memmove(cwFFTSampleWindow, cwFFTSampleWindow + n, (kCWFFTSize - n) * sizeof(Ipp32f));
+    memcpy(cwFFTSampleWindow + (kCWFFTSize - n), wideband, n * sizeof(Ipp32f));
+}
+
+// Runs the kCWFFTSize-point peak-search FFT on the current sliding window (Hann-windowed), then:
+//  - masks +-kCWPeakMaskRadius bins around every already-tracked slicer's bin (so an existing tone
+//    can't inflate the noise floor or be re-detected as new);
+//  - averages the remaining (unmasked) bins' magnitude into avgMag, the noise-floor reference for
+//    the new-peak test below (mark/space thresholding is handled independently per slicer - see
+//    CWSlicer::weightedHistory / AssignCWSlicers);
+//  - finds the loudest unmasked bin exceeding avgMag by kCWPeakThresholdDb (loud enough and more
+//    than kCWPeakMaskRadius bins from every tracked slicer), then requires it to land within
+//    kCWPeakConfirmBins of the *previous* peak-search hop's candidate before reporting it as a
+//    confirmed new peak - a single noisy hop can no longer launch a slicer on its own, since a
+//    real CW tone persists across consecutive ~kCWPeakHopSize-sample hops while a noise spike
+//    generally doesn't land on the same bin twice in a row.
+bool CRadio::FindCWPeak(int* peakBin, float* peakMag)
+{
+    for (int i = 0; i < kCWFFTSize; i++)
+    {
+        cwFFTData[i].re = cwFFTSampleWindow[i] * cwHannWindow[i];
+        cwFFTData[i].im = 0.0f;
+    }
+    ippsFFTFwd_CToC_32fc_I(cwFFTData, pCWFFTSpec, pCWFFTWorkBuf);
+
+    float mag[kCWNumBins];
+    for (int b = 0; b < kCWNumBins; b++)
+    {
+        float re = cwFFTData[kCWBinLo + b].re;
+        float im = cwFFTData[kCWBinLo + b].im;
+        mag[b] = sqrtf(re * re + im * im);
+    }
+
+    bool masked[kCWNumBins];
+    memset(masked, 0, sizeof(masked));
+    for (int s = 0; s < kCWMaxSlicers; s++)
+    {
+        if (!cwSlicers[s].used) continue;
+        int center = cwSlicers[s].binIndex - kCWBinLo;
+        int lo = center - kCWPeakMaskRadius; if (lo < 0) lo = 0;
+        int hi = center + kCWPeakMaskRadius; if (hi > kCWNumBins - 1) hi = kCWNumBins - 1;
+        for (int b = lo; b <= hi; b++) masked[b] = true;
+    }
+
+    double sum = 0.0;
+    int count = 0;
+    for (int b = 0; b < kCWNumBins; b++)
+    {
+        if (masked[b]) continue;
+        sum += mag[b];
+        count++;
+    }
+    float avgMag = (count > 0) ? (float)(sum / count) : 0.0f;
+
+    const float kPeakRatio = powf(10.0f, kCWPeakThresholdDb / 20.0f); // magnitude-domain dB
+    float peakThreshold = avgMag * kPeakRatio;
+
+    int bestB = -1;
+    float bestMag = peakThreshold;
+    for (int b = 0; b < kCWNumBins; b++)
+    {
+        if (masked[b]) continue;
+        if (mag[b] > bestMag) { bestMag = mag[b]; bestB = b; }
+    }
+    if (bestB < 0)
+    {
+        cwPendingPeakBin = -1; // no candidate this hop breaks any run in progress
+        return false;
+    }
+
+    int candidateBin = bestB + kCWBinLo;
+
+    int binDiff = candidateBin - cwPendingPeakBin;
+    if (binDiff < 0) binDiff = -binDiff;
+    bool confirmed = (cwPendingPeakBin >= 0) && (binDiff <= kCWPeakConfirmBins);
+
+    cwPendingPeakBin = candidateBin;
+    if (!confirmed) return false;
+
+    cwPendingPeakBin = -1; // consumed - next new peak needs its own fresh two-hit confirmation
+    *peakBin = candidateBin;
+    *peakMag = bestMag;
+    return true;
+}
+
+// Only cwSlicers[0] is ever tuned - slots 1..kCWMaxSlicers-1 are kept allocated (struct/array/loops
+// all still in place) but stay permanently unused; this is a deliberate single-active-slicer mode,
+// not a fallback. If a new peak was found this hop (already confirmed by FindCWPeak to be above the
+// average unmasked bin magnitude by kCWPeakThresholdDb, and clear of the tracked slicer's bin), it
+// only claims slot 0 if that slot is unused, or if this peak's magnitude beats the magnitude that
+// slot was last tuned with - i.e. a new candidate only steals the slicer away from whatever it's
+// currently tracking if it's the stronger signal. A weaker candidate is simply ignored and the
+// current tuning is left alone. FindCWPeak's own confirm-bin logic (see cwPendingPeakBin) still
+// resets/re-confirms independently whenever the candidate frequency moves, before any of this
+// amplitude gating ever runs. The claimed slot's reference tone is generated once here, in full
+// (kCWFFTSize samples), via ippsTone_32fc into its pre-allocated buffer - it is never regenerated
+// again until the slot is reclaimed for a different peak.
+//
+// Then every used slicer (including one just claimed above) tone-correlates against only the
+// newest kCWHopSize audio samples, taken from a plain slice of that precomputed tone buffer starting
+// at toneIndex (no trig evaluation on the per-hop path at all). Because the tracked frequency is
+// always an exact FFT bin, the tone is exactly periodic over kCWFFTSize samples, so advancing
+// toneIndex by kCWHopSize each hop (wrapping modulo kCWFFTSize, which divides evenly) always lines
+// up with the correct phase - equivalent to a continuous single-frequency demodulator without ever
+// re-running the oscillator. The real audio is dotted against that slice, reduced to one raw complex
+// value per hop; the previous two hops' raw complex correlator outputs are combined
+// oldest/middle/newest 0.5/1.0/0.5 as complex numbers (a phase-coherent boxcar, not an average of
+// magnitudes - phase continuity across hops is what makes this valid), and only then is the
+// magnitude of that weighted sum taken as this hop's reading. That reading is pushed into the
+// slicer's own 64-hop weightedHistory, and threshold-high/low are recomputed every hop from that
+// history's min/max (60/40 and 40/60 split) - each slicer adapts to its own tone's actual signal
+// range instead of comparing against a shared FFT-derived noise floor. Above threshold-low stays
+// marking, above threshold-high starts marking, before RunCWSlicerTiming turns that verdict into
+// dots/dashes. This runs every hop (kCWHopSize samples) regardless of how often FindCWPeak itself
+// runs, so timing resolution is unaffected by the slower peak-search cadence. The active slicer is
+// never freed/timed-out on idle - it only gets retuned when a stronger peak comes along.
+void CRadio::AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float hopMs, Ipp32f* wideband, int n)
+{
+    if (foundPeak)
+    {
+        const int idx = 0; // single active slicer; slots 1..kCWMaxSlicers-1 stay unused
+
+        if (!cwSlicers[idx].used || peakMag > cwSlicers[idx].peakMag)
+        {
+            Ipp32fc* tone = cwSlicers[idx].tone; // preserved across ResetCWSlicer - it never touches .tone
+            ResetCWSlicer(cwSlicers[idx]);
+            cwSlicers[idx].tone = tone;
+            cwSlicers[idx].used = true;
+            cwSlicers[idx].binIndex = peakBin;
+            cwSlicers[idx].freqNorm = peakBin / (float)kCWFFTSize;
+            cwSlicers[idx].peakMag = peakMag;
+
+            float tonePhase = 0.0f; // arbitrary fixed start - a constant phase offset cancels out of |weighted32fc|
+            ippsTone_32fc(cwSlicers[idx].tone, kCWFFTSize, cwToneMagn, cwSlicers[idx].freqNorm, &tonePhase, ippAlgHintFast);
+        }
+    }
+
+    for (int s = 0; s < kCWMaxSlicers; s++)
+    {
+        if (!cwSlicers[s].used) continue;
+
+        Ipp32fc corr;
+        ippsDotProd_32f32fc(wideband, cwSlicers[s].tone + cwSlicers[s].toneIndex, n, &corr);
+        cwSlicers[s].toneIndex = (cwSlicers[s].toneIndex + n) % kCWFFTSize;
+
+        Ipp32fc weighted32fc;
+        weighted32fc.re = 0.5f * cwSlicers[s].magHistory[0].re + 1.0f * cwSlicers[s].magHistory[1].re + 0.5f * corr.re;
+        weighted32fc.im = 0.5f * cwSlicers[s].magHistory[0].im + 1.0f * cwSlicers[s].magHistory[1].im + 0.5f * corr.im;
+        float weighted = sqrtf(weighted32fc.re * weighted32fc.re + weighted32fc.im * weighted32fc.im);
+
+        cwSlicers[s].magHistory[0] = cwSlicers[s].magHistory[1];
+        cwSlicers[s].magHistory[1] = corr;
+
+        PushCWWeightedHistory(cwSlicers[s].weightedHistory, weighted);
+
+        float histMin = cwSlicers[s].weightedHistory[0];
+        float histMax = cwSlicers[s].weightedHistory[0];
+        for (int h = 1; h < 64; h++)
+        {
+            float v = cwSlicers[s].weightedHistory[h];
+            if (v < histMin) histMin = v;
+            if (v > histMax) histMax = v;
+        }
+
+        if (!cwSlicers[s].histMinAvgInit)
+        {
+            cwSlicers[s].histMinAvg = histMin;
+            cwSlicers[s].histMinAvgInit = true;
         }
         else
         {
-            if (cwPatternLen < (int)sizeof(cwPattern) - 1) cwPattern[cwPatternLen++] = '-';
-            cwDotUnitMs = cwDotUnitMs * 0.9f + (durationMs / 3.0f) * 0.1f;
+            cwSlicers[s].histMinAvg = 0.9f * cwSlicers[s].histMinAvg + 0.1f * histMin;
         }
-        if (cwDotUnitMs < 20.0f)  cwDotUnitMs = 20.0f;
-        if (cwDotUnitMs > 300.0f) cwDotUnitMs = 300.0f;
+
+        float histRange = histMax - cwSlicers[s].histMinAvg;
+        float threshHigh = cwSlicers[s].histMinAvg * cwSquelch + 0.2f * histRange;
+        float threshLow = cwSlicers[s].histMinAvg * cwSquelch + 0.1f * histRange;
+
+        bool isMark = cwSlicers[s].markState
+            ? (weighted > threshLow)
+            : (weighted > threshHigh);
+
+ /*       if ((histMax / histMin) < cwSquelch) isMark = false;*/
+
+        if (isMark) cwSlicers[s].hopsSinceMark = 0;
+        else        cwSlicers[s].hopsSinceMark++;
+
+        RunCWSlicerTiming(cwSlicers[s], isMark, hopMs);
     }
-    else // a space just ended
+}
+
+// Ported from the old envelope decoder's per-hop run-length state machine, driven by a per-hop
+// "did this slicer see a mark this hop" boolean instead of a continuous envelope signal.
+void CRadio::RunCWSlicerTiming(CWSlicer& slicer, bool markThisHop, float hopMs)
+{
+    if (markThisHop == slicer.markState)
     {
-        if (durationMs >= cwDotUnitMs * 6.0f)
+        slicer.stateHopCount++;
+
+        // Mid-space and already long enough to end the character - resolve now instead of waiting
+        // for the next mark (which, for the last character of a transmission, may never come).
+        if (!slicer.markState && !slicer.resolvedThisSpace)
         {
-            ResolveCWCharacter();
-            AppendCWText(" ");
+            float durationMsSoFar = slicer.stateHopCount * hopMs;
+            if (durationMsSoFar >= slicer.dotUnitMs * 2.25f)
+            {
+                ResolveCWSlicerCharacter(slicer);
+                slicer.resolvedThisSpace = true;
+            }
         }
-        else if (durationMs >= cwDotUnitMs * 2.0f)
-        {
-            ResolveCWCharacter();
-        }
-        // else: intra-character gap, keep accumulating the same character
+        return;
     }
 
-    cwMarkState = isMark;
-    cwStateHopCount = 1;
+    // The 0.5/1.0/0.5-weighted 3-hop magnitude history in AssignCWSlicers smears each transition
+    // by ~2 hops: it lengthens marks and shortens spaces, so back that out (in opposite directions)
+    // before classifying the run. Anything left at zero or below is too short to be real and is
+    // dropped as noise instead of being misread as a spurious dot or gap.
+ /*   int adjustedHopCount = slicer.markState
+        ? (slicer.stateHopCount - 2)
+        : (slicer.stateHopCount + 2);*/
+    int adjustedHopCount = slicer.stateHopCount;
+
+    PushCWHistory(slicer.markState ? slicer.markLengths : slicer.spaceLengths, adjustedHopCount);
+
+    if (adjustedHopCount > 0)
+    {
+        float durationMs = adjustedHopCount * hopMs;
+
+        if (slicer.markState) // a mark run just ended
+        {
+            if (durationMs < hopMs * 3.5)
+            {
+                //Disregard as noise
+            }
+            else if (durationMs < slicer.dotUnitMs * 2.0f)
+            {
+                if (slicer.patternLen < (int)sizeof(slicer.pattern) - 1) slicer.pattern[slicer.patternLen++] = '.';
+                slicer.dotUnitMs = slicer.dotUnitMs * 0.7f + durationMs * 0.3f;
+            }
+            else
+            {
+                if (slicer.patternLen < (int)sizeof(slicer.pattern) - 1) slicer.pattern[slicer.patternLen++] = '-';
+                slicer.dotUnitMs = slicer.dotUnitMs * 0.9f + (durationMs / 3.0f) * 0.1f;
+            }
+            if (slicer.dotUnitMs < 20.0f)  slicer.dotUnitMs = 20.0f;
+            if (slicer.dotUnitMs > 200.0f) slicer.dotUnitMs = 200.0f;
+        }
+        else // a space run just ended
+        {
+            // The character itself, if any, was most likely already resolved mid-space above, as
+            // soon as the run crossed dotUnitMs*2.25 - this just catches the case where the run was
+            // too short for that to have fired, and still appends the word space if warranted.
+            if (durationMs >= slicer.dotUnitMs * 4.75f)
+            {
+                if (!slicer.resolvedThisSpace) ResolveCWSlicerCharacter(slicer);
+                AppendCWSlicerText(slicer, " ");
+            }
+            else if (durationMs >= slicer.dotUnitMs * 2.25f)
+            {
+                if (!slicer.resolvedThisSpace) ResolveCWSlicerCharacter(slicer);
+            }
+            // else: intra-character gap
+        }
+    }
+
+    slicer.markState = markThisHop;
+    slicer.stateHopCount = 1;
+    slicer.resolvedThisSpace = false;
+}
+
+// Called from the UI thread (CW Peaking button). Just arms the capture; DoRXDSP fills
+// CWPeakBuffer a hop at a time and runs the analysis once it's full.
+void CRadio::StartCWPeakCapture()
+{
+    CWPeakSampleCount = 0;
+    CWPeakReady = false;
+    CWPeakCapturing = true;
+}
+
+// Hann-windows the captured audio, FFTs it, and finds the loudest bin between 300-1100 Hz.
+void CRadio::RunCWPeakAnalysis()
+{
+    ippsZero_32fc(CWPeakFFTData, 16384);
+    for (int i = 0; i < 16384; i++)
+        CWPeakFFTData[i].re = CWPeakBuffer[i] * CWPeakHannWindow[i];
+
+    ippsFFTFwd_CToC_32fc_I(CWPeakFFTData, pCWPeakFFTSpec, pCWPeakFFTWorkBuf);
+
+    const float binHz = 48000.0f / 16384.0f; // ~2.93 Hz/bin
+    int kMin = (int)ceilf(300.0f / binHz);
+    int kMax = (int)floorf(1100.0f / binHz);
+    if (kMin < 1)    kMin = 1;
+    if (kMax > 8191) kMax = 8191;
+
+    int   bestK = kMin;
+    float bestMagSq = 0.0f;
+    for (int k = kMin; k <= kMax; k++)
+    {
+        float re = CWPeakFFTData[k].re;
+        float im = CWPeakFFTData[k].im;
+        float magSq = re * re + im * im;
+        if (magSq > bestMagSq) { bestMagSq = magSq; bestK = k; }
+    }
+
+    CWPeakFreq = bestK * binHz;
+}
+
+// Called once per DoRXDSP hop (256 samples @ 48 kHz => ~5.33 ms) on wideband, pre-CW-filter audio.
+// The sliding window and every active slicer's tone-correlator + mark/space timing update every
+// hop; the much heavier kCWFFTSize-point peak search only runs once every kCWPeakHopSize samples
+// (~85.3 ms) via the accumulator below, so CW timing resolution doesn't depend on peak-search cost.
+void CRadio::DoCWFFTDecode(Ipp32f* wideband, int n)
+{
+    CaptureCWSpectrum(wideband, n);
+
+    int peakBin = -1;
+    float peakMag = 0.0f;
+    bool foundPeak = false;
+
+    cwPeakHopAccum += n;
+    if (cwPeakHopAccum >= kCWPeakHopSize)
+    {
+        cwPeakHopAccum -= kCWPeakHopSize;
+        foundPeak = FindCWPeak(&peakBin, &peakMag);
+    }
+
+    float hopMs = n * 1000.0f / 48000.0f;
+    AssignCWSlicers(foundPeak, peakBin, peakMag, hopMs, wideband, n);
 }
 
 void CRadio::UpdateADCs(char * readData)
@@ -831,6 +1428,7 @@ void CRadio::RXDataLoop()
             SetFreq(LOfreq);
             myStatus->RXFreq = LOfreq;
             NewLOFreq = false;
+            ResetCWDecoder(); // tuning moves every tone's bin index - stale slicers/filter state no longer apply
         }
         if (ALCCounter < 80) ALCCounter++;
         else bypassALC = false;
@@ -1805,6 +2403,10 @@ int CRadio::DataThread()
         else if (myStatus->mode == VNA_MODE) // Tune
         {
             AntTuneDataLoop();
+        }
+        else if (myStatus->mode == CW_TX_MODE) // CW send
+        {
+            CWTXDataLoop();
         }
 
 	}
