@@ -1557,6 +1557,7 @@ void MyFrame::B3Click(wxCommandEvent& event) // ANT TUNE
 
 void MyFrame::B4Click(wxCommandEvent& event) // TRANSMIT
 {
+    if (!antTuneRun) return;
     if (myRadio->CWModeEnabled)
     {
         CWSendDialog* dlg = new CWSendDialog(this);
@@ -1647,7 +1648,16 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
     if (SPtoTX)
     {
         int key = event.GetKeyCode();
-        if (key == 'T' && antTuneRun) { myRadio->myStatus->mode = TX_MODE; return; }
+        if (key == 'T' && antTuneRun) {
+            if (myRadio->CWModeEnabled)
+            {
+                CWSendDialog* dlg = new CWSendDialog(this);
+                dlg->Show(true);
+                return;
+            }
+
+            myRadio->myStatus->mode = 2;
+        }
         if (key == 'R') { myRadio->myStatus->mode = RX_MODE; return; }
         if (key == WXK_RIGHT) { wxCommandEvent dummy; B8Click(dummy); return; }
         if (key == WXK_LEFT)  { wxCommandEvent dummy; B7Click(dummy); return; }

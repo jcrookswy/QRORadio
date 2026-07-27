@@ -14,6 +14,7 @@
 bool gUseDebugWaveform = false;
 
 void BuildTXPacket(char* wd, Ipp32fc* pIQ); // defined below; used by both TXDataLoop and CWTXDataLoop
+void ResetTXPacketState(); // defined below, next to BuildTXPacket
 
 
 //void ProcessPlotThread(int id, void* p) {
@@ -960,6 +961,13 @@ void CRadio::CWTXDataLoop()
     int envCount = 0;
     Ipp32f* env = BuildCWTXEnvelope(cwTxMessage, &envCount);
 
+    // This is a fresh, independent transmission, not a continuation of whatever was last sent
+    // (SSB or an earlier CW message) - reset the state BuildTXPacket and the resampler otherwise
+    // carry across calls by design, so it can't start out attenuated/distorted by leftover history.
+    ResetTXPacketState();
+    ippsResamplePolyphaseInit_32f(128, 32, 0.4, 4.0, resample_state,   ippAlgHintAccurate);
+    ippsResamplePolyphaseInit_32f(128, 32, 0.4, 4.0, resample_state_q, ippAlgHintAccurate);
+
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
 
     writeData[0] = 't'; // Transmit mode
@@ -1544,10 +1552,23 @@ int g_abs_max_amp = 276;
 #define DBG_MIN_AMP 40 // off below this setting
 //#define DBG_MAX_AMP 30 // 30 is barely on
 //#define DBG_MIN_AMP 25 // 28 is barely off
+static int gTXPacketLastPhase = 0;
+static float gTXPacketRemainder = 0.0f;
+
+// TXDataLoop/CWTXDataLoop are independent transmissions, not a continuous stream, but
+// BuildTXPacket's phase-continuity and amplitude-dither state persists across calls by default
+// (shared between both). CWTXDataLoop calls this before sending, so a CW message never starts by
+// inheriting phase/dither state left over from whatever was sent last.
+void ResetTXPacketState()
+{
+    gTXPacketLastPhase = 0;
+    gTXPacketRemainder = 0.0f;
+}
+
 void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 {
-    static int lastPhase = 0;
-    static float remainder = 0.0;
+    int& lastPhase = gTXPacketLastPhase;
+    float& remainder = gTXPacketRemainder;
     Ipp32f ampl[32];
     Ipp32f phase[32];
     ippsMagnitude_32fc(pIQ, ampl, 32);
@@ -2515,7 +2536,7 @@ int CRadio::Connect()
     int port = 5;
     AudioInputChannels = 1;
     fscanf_s(f, "%d", &port);
-    port = 5; //DEBUG
+//    port = 3; //DEBUG
     fscanf_s(f, "%d", &AudioInputChannels);
  //   fscanf_s(f, "%f", &LOfreq);
     fscanf_s(f, "%d", &RelaySettings);
