@@ -196,6 +196,8 @@ public:
 	static const int kCWBinLo    = 35;                      // ceil(200 / (48000/8192))
 	static const int kCWBinHi    = 477;                     // floor(2800 / (48000/8192))
 	static const int kCWNumBins  = kCWBinHi - kCWBinLo + 1; // 443
+	static const int kCWPeakBinLo = 103;                    // ceil(600 / (48000/8192)) - FindCWPeak only
+	static const int kCWPeakBinHi = 136;                    // floor(800 / (48000/8192)) - searches this band
 	static const int kCWMaxSlicers        = 4;
 	static const int kCWPeakMaskRadius    = 10;              // bins excluded around each tracked slicer ("more than 3 bins" away is a valid new peak)
 	static constexpr float kCWPeakThresholdDb = 10.0f;      // new peak must exceed the average unmasked-bin magnitude by this many dB
@@ -237,14 +239,15 @@ public:
 
 	// CW transmit (see CWTXDataLoop in CRadio.cpp): StartCWTransmit stashes the text and switches
 	// to CW_TX_MODE; CWTXDataLoop (background data thread) builds a raised-cosine-tapered on/off
-	// keyed envelope from it and streams it out. Deliberately bypasses the SSB HPF/AGC/CESSB chain -
-	// Q is always 0 (plain carrier on/off keying at LOfreq, no audio-frequency offset needed) - but
+	// keyed envelope from it, modulates it onto a cwSidetoneHz rotating I/Q phasor (so the carrier
+	// lands cwSidetoneHz above the tuned frequency, matching the RX side's CW convention, instead of
+	// exactly on it), and streams that out. Deliberately bypasses the SSB HPF/AGC/CESSB chain - but
 	// still runs through the same LO-locked polyphase resampler TXDataLoop uses before BuildTXPacket,
 	// so dot timing comes out right in real time regardless of LOfreq.
 	float cwTxDotMs;             // TX dot length, ms - hard-coded for now (see CRadio constructor)
 	static const int kCWTxTaperSamples = 256; // raised-cosine rise/fall on each mark, at 48 kHz
 	static const int kCWTxFlushSamples = 768; // zero-amplitude leader/trailer, at 48 kHz, to flush the pipe
-	static constexpr float kCWTxPeakAmplitude = 0.5f; // peak I magnitude (25% power) - revisit later
+	static constexpr float kCWTxPeakAmplitude = 0.5f; // peak envelope magnitude (25% power) - revisit later
 
 	// Sidetone: the same envelope, at an audible tone instead of DC, written to audioOutBuf so
 	// PortAudio plays the dots/dashes out while CWTXDataLoop is sending (see patestCallback, which

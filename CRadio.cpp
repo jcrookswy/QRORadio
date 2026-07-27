@@ -919,7 +919,8 @@ static int EmitCWTXSequence(Ipp32f* env, const char* text, int dotSamples, int t
 }
 
 // Builds the full raised-cosine-tapered on/off keyed envelope for text, at 48 kHz, as a real-only
-// (Q always 0 - see CWTXDataLoop) amplitude buffer. Caller owns the returned buffer (ippsFree it).
+// magnitude buffer - CWTXDataLoop is what turns this into an actual I/Q signal (modulating it onto
+// a cwSidetoneHz phasor). Caller owns the returned buffer (ippsFree it).
 Ipp32f* CRadio::BuildCWTXEnvelope(const char* text, int* outSampleCount)
 {
     int dotSamples = (int)lroundf(cwTxDotMs * 48.0f); // cwTxDotMs is in ms; audio rate is 48 kHz
@@ -948,11 +949,17 @@ void CRadio::StartCWTransmit(const char* text)
 }
 
 // Builds the keyed envelope for cwTxMessage and streams it to the hardware, then returns to RX_MODE.
-// Deliberately skips TXDataLoop's HPF/LPF/AGC/CESSB chain entirely - CW is plain carrier on/off
-// keying (Q is always 0, so BuildTXPacket's phase stays flat and only amplitude moves), not an
-// audio-frequency signal that needs voice-band processing. Still runs through the same LO-locked
-// polyphase resampler (factor tied to LOfreq, exactly as TXDataLoop uses) before BuildTXPacket, so
-// real-world dot timing comes out right regardless of the current LO frequency.
+// Deliberately skips TXDataLoop's HPF/LPF/AGC/CESSB chain entirely - the keying envelope (env[],
+// from BuildCWTXEnvelope) is already clean, so none of that voice-band processing is needed. It's
+// not plain carrier on/off at LOfreq, though: the transmitted tone has to land cwSidetoneHz *above*
+// the tuned frequency (matching the RX side's own 700 Hz CW convention), so the envelope alone is
+// run through the same LO-locked polyphase resampler TXDataLoop uses (factor tied to LOfreq) - the
+// exact same real-only resample call this used before the 700 Hz offset existed - and only *after*
+// that is it turned into a rotating I/Q phasor at cwSidetoneHz (I = env*cos, Q = env*sin, a
+// positive-frequency analytic signal - same sign convention ApplyAnalyticBandpass uses for CESSB's
+// Hilbert transform, which is what makes CESSB's own upper-sideband upconversion land above the
+// dial frequency instead of on it). Modulating after resampling instead of before means the
+// resampler itself only ever has to handle the smooth envelope, never an oscillating signal.
 void CRadio::CWTXDataLoop()
 {
     char writeData[132]; // 1 header + 32 IQ pairs x 4 bytes = 129 bytes
@@ -981,6 +988,26 @@ void CRadio::CWTXDataLoop()
     float sidetonePhase = 0.0f;
     float sidetonePhaseInc = (float)(IPP_2PI * cwSidetoneHz / 48000.0);
 
+    // The RF tone is modulated on *after* resampling, at the resampler's actual output rate
+    // (factor * 48000 Hz - "resample to the LO frequency / 256" per TXDataLoop's own comment on
+    // factor), not before. Only the plain envelope ever goes through ippsResamplePolyphase_32f -
+    // the exact same real-only, proven call this used before the 700 Hz offset was added - so the
+    // resampler is never asked to handle an oscillating input, only the smooth env[] it always has.
+    double outputRate = 48000.0 * factor;
+    double rfPhase = 0.0;
+    double rfPhaseInc = IPP_2PI * cwSidetoneHz / outputRate;
+
+    // TXDataLoop is naturally real-time-paced because it only processes a block once that much new
+    // mic audio has actually arrived from the live 48 kHz callback. This loop has no live input to
+    // wait on - env[] is all sitting in memory already - so without an explicit pace it would blast
+    // every block through as fast as the CPU allows, hundreds of ms of audio at a time. That's fine
+    // for the serial/hardware side (its own FIFO drains it at the real rate regardless), but it
+    // massively overruns audioOutBuf's ~341 ms (16384-sample) ring well ahead of PortAudio's
+    // real-time playback, so most of the sidetone gets overwritten before it's ever heard. Pace each
+    // 1024-sample (~21.3 ms) block to wall-clock time, computed from the start rather than
+    // incrementally, so any single sleep's imprecision doesn't accumulate into drift over a message.
+    auto txStartTime = std::chrono::steady_clock::now();
+
     int pos = 0;
     while (pos < envCount && CW_TX_MODE == myStatus->mode) // abort early if the user hits RECEIVE
     {
@@ -1000,16 +1027,27 @@ void CRadio::CWTXDataLoop()
         int newSampleCount = 0;
         ippsResamplePolyphase_32f(&env[pos], 1024, &resampledAudioOut[ResampleOutCount],
             factor, 1.0, &time, &newSampleCount, resample_state);
-        // Q is always 0 (plain carrier keying) - no need to actually resample an all-zero array.
-        ippsZero_32f(&resampledAudioOutQ[ResampleOutCount], newSampleCount);
-        ResampleOutCount += newSampleCount;
         time -= 1024;
         pos += 1024;
 
+        // Modulate the just-resampled real envelope onto the RF tone: resampledAudioOut currently
+        // holds resampled |env|, at the resampler's own output rate - turn each sample into I, and
+        // derive Q from it, at that same rate (rfPhaseInc), rather than resampling an already-
+        // modulated signal (see the comment above rfPhase for why).
+        for (int n = 0; n < newSampleCount; n++)
+        {
+            float e = resampledAudioOut[ResampleOutCount + n];
+            resampledAudioOut[ResampleOutCount + n]  = (float)(e * cos(rfPhase));
+            resampledAudioOutQ[ResampleOutCount + n] = (float)(e * sin(rfPhase));
+            rfPhase += rfPhaseInc;
+            if (rfPhase >= IPP_2PI) rfPhase -= IPP_2PI;
+        }
+        ResampleOutCount += newSampleCount;
+
         int sendSampleCount = (ResampleOutCount / 32) * 32;
+        Ipp32fc iq[32];
         for (int s = 0; s < sendSampleCount; s += 32)
         {
-            Ipp32fc iq[32];
             for (int k = 0; k < 32; k++)
                 iq[k] = { resampledAudioOut[s + k], resampledAudioOutQ[s + k] };
             BuildTXPacket(writeData, iq);
@@ -1020,6 +1058,8 @@ void CRadio::CWTXDataLoop()
         ippsCopy_32f(&resampledAudioOut[sendSampleCount],  resampledAudioOut,  ResampleOutCount - sendSampleCount);
         ippsCopy_32f(&resampledAudioOutQ[sendSampleCount], resampledAudioOutQ, ResampleOutCount - sendSampleCount);
         ResampleOutCount -= sendSampleCount;
+
+        std::this_thread::sleep_until(txStartTime + std::chrono::microseconds((long long)pos * 1000000LL / 48000LL));
     }
     // Any final leftover (<32 samples) is dropped - it only ever comes from the tail of the zero
     // trailer, so there's no real content in it to lose.
@@ -1044,11 +1084,14 @@ void CRadio::CaptureCWSpectrum(Ipp32f* wideband, int n)
 // Runs the kCWFFTSize-point peak-search FFT on the current sliding window (Hann-windowed), then:
 //  - masks +-kCWPeakMaskRadius bins around every already-tracked slicer's bin (so an existing tone
 //    can't inflate the noise floor or be re-detected as new);
-//  - averages the remaining (unmasked) bins' magnitude into avgMag, the noise-floor reference for
-//    the new-peak test below (mark/space thresholding is handled independently per slicer - see
-//    CWSlicer::weightedHistory / AssignCWSlicers);
-//  - finds the loudest unmasked bin exceeding avgMag by kCWPeakThresholdDb (loud enough and more
-//    than kCWPeakMaskRadius bins from every tracked slicer), then requires it to land within
+//  - restricts the search (and the noise-floor average below) to the kCWPeakBinLo..kCWPeakBinHi
+//    sub-band (600-800 Hz) - new peaks are never looked for outside that range, even though the
+//    wider 200-2800 Hz capture band is still what's masked/tracked per slicer;
+//  - averages the remaining (unmasked, in-band) bins' magnitude into avgMag, the noise-floor
+//    reference for the new-peak test below (mark/space thresholding is handled independently per
+//    slicer - see CWSlicer::weightedHistory / AssignCWSlicers);
+//  - finds the loudest unmasked in-band bin exceeding avgMag by kCWPeakThresholdDb (loud enough and
+//    more than kCWPeakMaskRadius bins from every tracked slicer), then requires it to land within
 //    kCWPeakConfirmBins of the *previous* peak-search hop's candidate before reporting it as a
 //    confirmed new peak - a single noisy hop can no longer launch a slicer on its own, since a
 //    real CW tone persists across consecutive ~kCWPeakHopSize-sample hops while a noise spike
@@ -1081,9 +1124,16 @@ bool CRadio::FindCWPeak(int* peakBin, float* peakMag)
         for (int b = lo; b <= hi; b++) masked[b] = true;
     }
 
+    // New peaks are only ever looked for in the 600-800 Hz sub-band (kCWPeakBinLo/Hi, in absolute
+    // FFT bins - offset by kCWBinLo to index into mag[]/masked[]); the noise-floor average is scoped
+    // to the same sub-band so the threshold test compares against the actual local noise there
+    // instead of the full 200-2800 Hz capture band.
+    int searchLo = kCWPeakBinLo - kCWBinLo;
+    int searchHi = kCWPeakBinHi - kCWBinLo;
+
     double sum = 0.0;
     int count = 0;
-    for (int b = 0; b < kCWNumBins; b++)
+    for (int b = searchLo; b <= searchHi; b++)
     {
         if (masked[b]) continue;
         sum += mag[b];
@@ -1096,7 +1146,7 @@ bool CRadio::FindCWPeak(int* peakBin, float* peakMag)
 
     int bestB = -1;
     float bestMag = peakThreshold;
-    for (int b = 0; b < kCWNumBins; b++)
+    for (int b = searchLo; b <= searchHi; b++)
     {
         if (masked[b]) continue;
         if (mag[b] > bestMag) { bestMag = mag[b]; bestB = b; }
