@@ -70,33 +70,63 @@ struct CWSlicer {
     int   markLengths[16];
     int   spaceLengths[16];
 
-    // Reference-tone correlator (see AssignCWSlicers): pre-allocated kCWFFTSize-sample complex tone
-    // buffer, generated once via ippsTone_32fc when the slot is (re)assigned to a new peak - never
-    // regenerated hop-to-hop. Because the tracked frequency is always an exact FFT bin (freqNorm =
-    // binIndex/kCWFFTSize), the tone is exactly periodic over kCWFFTSize samples, so a plain
-    // kCWHopSize-wide slice starting at toneIndex is phase-correct for every hop; toneIndex just
-    // advances by kCWHopSize (wrapping modulo kCWFFTSize, which divides evenly) each time, no
-    // per-hop trig evaluation needed. magHistory[0]/[1] are the previous two hops' raw complex
-    // correlator outputs (oldest, then middle) - combined 0.5/1.0/0.5 with the newest complex value
-    // *before* taking the magnitude, so the boxcar is a complex (phase-coherent) sum, not an average
-    // of magnitudes.
-    Ipp32fc* tone;
+    // Tracked frequency, normalized to kCWFFTSize (binIndex/kCWFFTSize) - used to build the on-pitch
+    // 512-point DFT tone below (see BuildCWDFTTone).
     float freqNorm;
-    int toneIndex;
-    Ipp32fc magHistory[2];
 
-    // Per-slicer adaptive mark/space threshold (see AssignCWSlicers): rolling history of the last
-    // 64 hops' weighted correlator magnitudes, oldest first. Each hop, threshold-high/low are
-    // recomputed from this history's own min/max (60/40 and 40/60 split) rather than from the
-    // shared FFT noise-floor estimate, so each slicer self-calibrates to its own tone's actual
-    // signal range instead of a global cwSquelch/cwHysteresis multiplier.
-    float weightedHistory[64];
+    // dftOnHistory holds the last 8 hops' raw dftOnCorr values (see AssignCWSlicers), newest first
+    // (index 0 = most recent hop, shifted right each hop as new values come in). Two vector sums are
+    // derived from it every hop - |vectorSum(newest 4)| and |vectorSum(oldest 4)| - which feed both:
+    //  - signalDetect: (|vectorSum(newest 4)| + |vectorSum(oldest 4)|) * cwSquelch > sum of the last
+    //    8 hops' dftNoiseHistory (see below) ("signal" vs "noise floor near the signal"). A real
+    //    tone's on-pitch correlator outputs stay roughly phase-aligned hop to hop, so each 4-hop half
+    //    adds up in its own vector sum; dftNoiseHistory's off-pitch correlators see no such tone, so
+    //    the ratio between the two separates signal from noise regardless of absolute level.
+    //  - diff = |vectorSum(newest 4)| - |vectorSum(oldest 4)| - the edge-detect input below (see
+    //    lastDiff), genuinely bipolar (unlike a plain envelope magnitude): near zero in a steady
+    //    mark or space, and forms a clean, well-localized peak right at each transition.
+	Ipp32fc dftOnHistory[8];
 
-    // IIR-smoothed histMin (see AssignCWSlicers): histMinAvg = histMin on the first hop after
-    // (re)tuning, then 0.9*histMinAvg + 0.1*histMin every hop after - damps hop-to-hop noise in
-    // the raw 64-entry-history min before it's used for the mark/space threshold.
-    float histMinAvg;
-    bool  histMinAvgInit;
+	// Last 8 hops' noise-floor estimate, newest first (shifted alongside dftOnHistory above): each
+	// entry is sqrt(|dftLowCorr|^2 + |dftHighCorr|^2) from that hop's two off-pitch correlators (see
+	// dftTonesLow/dftTonesHigh below), which see no on-pitch tone and so track ambient noise near the
+	// tracked bin. Summed (scalar, not vector - there's no coherent phase across noise samples to
+	// preserve) into the noiseMag side of the signalDetect ratio above.
+	Ipp32f	dftNoiseHistory[8];
+	bool    signalDetect;
+
+    // Edge-detect mark/space slicing (see AssignCWSlicers): diff (see dftOnHistory above), tracked
+    // hop to hop. A rising-to-falling reversal (a positive peak) marks the space->mark transition
+    // (gated by signalDetect). diffRising records which direction diff was last moving, so a
+    // reversal can be recognized on the single hop it happens.
+    float lastDiff;
+    bool  diffRising;
+
+    // Captured at the space->mark transition (the positive diff peak that triggered it) - see
+    // AssignCWSlicers. The mark->space transition then requires a negative diff peak (trough) of at
+    // least half this magnitude, or signalDetect dropping out, before releasing the mark.
+    float markPeakDiff;
+
+    // 3-tone 512-point overlapped-window correlator (see BuildCWDFTTone/AssignCWSlicers): dftTonesOn
+    // is on-pitch (binIndex), dftTonesLow/dftTonesHigh are +-kCWDFTBinOffset bins away - exactly the
+    // first null of a Hann(kCWDFTSize) window's frequency response, so an on-pitch signal reads ~zero
+    // on them. Each is kCWDFTBufLen samples: kCWDFTSegments independently Hann-windowed kCWDFTSize-
+    // sample blocks, one per hop position. Unlike a simple periodic buffer, these 512-sample windows
+    // overlap 50% in the underlying oscillator's phase from one hop to the next, so the same
+    // oscillator sample lands in two different windows under two different window coefficients and
+    // can't be read from one shared buffer via a strided slice - each block is precomputed and stored
+    // separately instead. dftSegIndex cycles 0..kCWDFTSegments-1, selecting which precomputed block
+    // lines up with the current hop's audio. dftOnCorr/dftLowCorr/dftHighCorr are the latest hop's
+    // raw dot-product results; dftOnCorr feeds dftOnHistory (see above) and drives the mark/space
+    // decision, dftLowCorr/dftHighCorr feed dftNoiseHistory (see above) each hop and are not otherwise
+    // retained.
+    Ipp32fc* dftTonesOn;
+    Ipp32fc* dftTonesLow;
+    Ipp32fc* dftTonesHigh;
+    int      dftSegIndex;
+    Ipp32fc  dftOnCorr;
+    Ipp32fc  dftLowCorr;
+    Ipp32fc  dftHighCorr;
 
     // FindCWPeak-reported magnitude of the candidate peak this slicer was last (re)tuned to (see
     // AssignCWSlicers) - a later candidate only steals this slot if its own magnitude beats this.
@@ -203,8 +233,20 @@ public:
 	static constexpr float kCWPeakThresholdDb = 10.0f;      // new peak must exceed the average unmasked-bin magnitude by this many dB
 	static const int kCWPeakConfirmBins  = 2;               // a candidate peak must land within this many bins of the previous peak-search hop's candidate before a slicer is launched
 
+	// 3-tone 512-point overlapped-window correlator (see CWSlicer::dftTonesOn/Low/High and
+	// AssignCWSlicers/BuildCWDFTTone) - separate from, and additional to, the kCWHopSize single-tone
+	// correlator above.
+	static const int kCWDFTSize      = 512;                        // dot-product window - 2x kCWHopSize, so consecutive hops overlap it 50%
+	static const int kCWDFTSegments  = kCWFFTSize / kCWHopSize;    // 32 - one precomputed Hann(kCWDFTSize)-windowed block per hop position
+	static const int kCWDFTBufLen    = kCWDFTSegments * kCWDFTSize; // 16384 - total precomputed samples per tone
+	static const int kCWDFTBinOffset = 2 * (kCWFFTSize / kCWDFTSize); // 32 - +-2 bins of the kCWDFTSize-point DFT, in kCWFFTSize-grid units;
+	                                                                    // exactly the first null of a Hann(kCWDFTSize) window's frequency response,
+	                                                                    // so an on-pitch tone reads ~zero on the low/high correlators
+
 	Ipp32f*  cwFFTSampleWindow;   // kCWFFTSize sliding window of wideband pre-filter audio, slid every hop
 	Ipp32f*  cwHannWindow;
+	Ipp32f*  cw512HannWindow;    // kCWDFTSize-point Hann window for the 3-tone correlator (see BuildCWDFTTone)
+	Ipp32fc* cwDFTGenScratch;    // scratch buffer, kCWFFTSize+kCWHopSize samples - see BuildCWDFTTone
 	Ipp32fc* cwFFTData;
 	IppsFFTSpec_C_32fc* pCWFFTSpec;
 	Ipp8u*   pCWFFTSpecBuf;
@@ -212,25 +254,24 @@ public:
 	int      cwPeakHopAccum;      // samples accumulated since the last big-FFT peak search; fires FindCWPeak at kCWPeakHopSize
 	int      cwPendingPeakBin;    // unconfirmed candidate bin from the previous peak-search hop, or -1; see FindCWPeak
 
-	// Per-slicer reference-tone amplitude (see AssignCWSlicers): just needs to keep the correlator's
-	// output in a sane float range (not underflowing/overflowing) - since each slicer's mark/space
-	// threshold is now self-derived from its own weightedHistory min/max (see CWSlicer), the
-	// correlator's absolute scale no longer has to be calibrated against anything else.
+	// Per-slicer reference-tone amplitude (see BuildCWDFTTone): just needs to keep the correlator's
+	// output in a sane float range (not underflowing/overflowing) - the edge-detect mark/space
+	// slicing (see CWSlicer::diffRising) only cares about the shape of the per-hop signal magnitude,
+	// not its absolute scale, so this doesn't need careful calibration.
 	float cwToneMagn;
 
-	// NOTE: no longer read by the CW mark/space decision (see CWSlicer::weightedHistory /
-	// AssignCWSlicers) - each slicer now self-calibrates its own threshold instead of using a
-	// shared multiplier against the FFT noise floor. Still user-settable via Radio > CW
-	// Squelch/Hysteresis, but currently has no effect; left in place pending a decision on
-	// whether to remove that menu or repurpose these.
+	// cwSquelch gates CWSlicer::signalDetect - see its assignment and use in AssignCWSlicers.
+	// cwHysteresis is still unused; user-settable via Radio > CW Squelch/Hysteresis but currently has
+	// no effect; left in place pending a decision on whether to remove that field or repurpose it.
 	float cwSquelch;
 	float cwHysteresis;
 
 	CWSlicer cwSlicers[kCWMaxSlicers];
 
 	void CaptureCWSpectrum(Ipp32f* wideband, int n);
-	bool FindCWPeak(int* peakBin, float* peakMag);
-	void AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float hopMs, Ipp32f* wideband, int n);
+	bool FindCWPeak(int* peakBin, float* peakMag, int& pendingBin);
+	void AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float hopMs);
+	void BuildCWDFTTone(Ipp32fc* dest, float freqNorm);
 	void RunCWSlicerTiming(CWSlicer& slicer, bool markThisHop, float hopMs);
 	void AppendCWSlicerText(CWSlicer& slicer, const char* s);
 	void ResolveCWSlicerCharacter(CWSlicer& slicer);
@@ -260,22 +301,19 @@ public:
 	void CWTXDataLoop();
 	Ipp32f* BuildCWTXEnvelope(const char* text, int* outSampleCount);
 
-	// CW Peaking: one-shot capture of 16384 (full-bandwidth, pre-CW-filter) RX audio samples,
-	// Hann-windowed and FFT'd to find the loudest tone between 300-1100 Hz. Runs across many
-	// DoRXDSP hops (256 samples each) before the analysis fires.
-	bool  CWPeakCapturing;   // true while samples are still being collected
-	bool  CWPeakReady;       // true once CWPeakFreq holds a fresh result for the UI to report
-	int   CWPeakSampleCount;
-	Ipp32f*  CWPeakBuffer;       // 16384 raw audio samples
-	Ipp32f*  CWPeakHannWindow;   // 16384-point Hann window
-	Ipp32fc* CWPeakFFTData;      // 16384 complex FFT working buffer
-	IppsFFTSpec_C_32fc* pCWPeakFFTSpec;
-	Ipp8u* pCWPeakFFTSpecBuf;
-	Ipp8u* pCWPeakFFTWorkBuf;
+	// CW Peaking: repeatedly runs FindCWPeak (the same 8192-point, 600-800 Hz, two-hit-confirmed
+	// search the live CW decoder uses) every kCWPeakHopSize samples until it reports a confirmed
+	// peak, using its own independent CWPeakPendingBin/CWPeakHopAccum state so it doesn't interfere
+	// with the live decoder's own confirm-bin stream if CW Mode happens to be running at the same
+	// time (see DoRXDSP). Works whether or not CW Mode is enabled - if it isn't, this drives
+	// CaptureCWSpectrum itself to keep the shared window current.
+	bool  CWPeakCapturing;    // true while waiting for a confirmed peak
+	bool  CWPeakReady;        // true once CWPeakFreq holds a fresh result for the UI to report
+	int   CWPeakPendingBin;   // FindCWPeak's confirm-state, independent of the live decoder's cwPendingPeakBin
+	int   CWPeakHopAccum;     // samples accumulated since the last FindCWPeak call; fires at kCWPeakHopSize
 	float CWPeakFreq; // Hz; last CW Peaking result - also intended for a future auto-tune feature
 
 	void StartCWPeakCapture();
-	void RunCWPeakAnalysis();
 
 	Ipp32f* MagData ;
 	Ipp32f* MagMinAccumData;
