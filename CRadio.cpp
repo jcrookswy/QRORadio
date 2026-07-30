@@ -242,7 +242,7 @@ CRadio::CRadio()
     // ("noise floor near the signal") - a real tone's on-pitch correlator outputs stay phase-aligned
     // hop to hop so each 4-hop half adds up in its own vector sum, while the off-pitch reference tones
     // see no such tone and just track ambient noise level.
-    cwSquelch = 2.0f;
+    cwSquelch = 0.5f;
     cwHysteresis = 0.1f;
     ResetCWDecoder();
 
@@ -778,14 +778,14 @@ static void ResetCWSlicer(CWSlicer& slicer)
     memset(slicer.markLengths, 0, sizeof(slicer.markLengths));
     memset(slicer.spaceLengths, 0, sizeof(slicer.spaceLengths));
     memset(slicer.dftOnHistory, 0, sizeof(slicer.dftOnHistory));
-    memset(slicer.dftNoiseHistory, 0, sizeof(slicer.dftOnHistory));
+    memset(slicer.dftNoiseHistory, 0, sizeof(slicer.dftNoiseHistory));
     
     slicer.signalDetect = false;
     slicer.freqNorm = 0.0f;
     slicer.peakMag = 0.0f;
     slicer.lastDiff = 0.0f;
     slicer.diffRising = false;
-    slicer.markPeakDiff = 0.0f;
+    slicer.markPeakAmp = 0.0f;
     slicer.dftSegIndex = 0;
     slicer.dftOnCorr.re = slicer.dftOnCorr.im = 0.0f;
     slicer.dftLowCorr.re = slicer.dftLowCorr.im = 0.0f;
@@ -1333,7 +1333,7 @@ void CRadio::AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float h
             if (cwSlicers[s].diffRising && !risingNow && cwSlicers[s].signalDetect)
             {
                 isMark = true;
-                cwSlicers[s].markPeakDiff = cwSlicers[s].lastDiff;
+                cwSlicers[s].markPeakAmp = signalMag; //Capture signal amplitude after rising edge detect
             }
         }
         else
@@ -1341,12 +1341,12 @@ void CRadio::AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float h
             // mark->space: either the signal itself drops out, or a negative diff peak (trough) at
             // least half the magnitude of the captured positive peak is detected.
             bool trough = !cwSlicers[s].diffRising && risingNow
-                && (-cwSlicers[s].lastDiff >= 0.5f * cwSlicers[s].markPeakDiff);
+                && (signalMag < 0.5f * cwSlicers[s].markPeakAmp);
             if (!cwSlicers[s].signalDetect || trough) isMark = false;
         }
 
-        cwSlicers[s].diffRising = risingNow;
         cwSlicers[s].lastDiff = diff;
+        cwSlicers[s].diffRising = risingNow;
 
         if (isMark) cwSlicers[s].hopsSinceMark = 0;
         else        cwSlicers[s].hopsSinceMark++;

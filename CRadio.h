@@ -105,7 +105,7 @@ struct CWSlicer {
     // Captured at the space->mark transition (the positive diff peak that triggered it) - see
     // AssignCWSlicers. The mark->space transition then requires a negative diff peak (trough) of at
     // least half this magnitude, or signalDetect dropping out, before releasing the mark.
-    float markPeakDiff;
+    float markPeakAmp;
 
     // 3-tone 512-point overlapped-window correlator (see BuildCWDFTTone/AssignCWSlicers): dftTonesOn
     // is on-pitch (binIndex), dftTonesLow/dftTonesHigh are +-kCWDFTBinOffset bins away - exactly the
