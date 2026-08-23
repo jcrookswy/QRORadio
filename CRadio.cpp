@@ -11,7 +11,13 @@
 
 #define ENABLE_CESSB    // Comment out to bypass CESSB (unprocessed SSB, no envelope clipping)
 
-bool gUseDebugWaveform = false;
+bool gUseDebugWaveform = false; // try this
+
+void ProcessDataThread(int id, void* p) {
+    CRadio* pRadio = (CRadio*)p;
+    pRadio->DataThread();
+    // Code to be executed in the new thread
+}
 
 void BuildTXPacket(char* wd, Ipp32fc* pIQ); // defined below; used by both TXDataLoop and CWTXDataLoop
 void ResetTXPacketState(); // defined below, next to BuildTXPacket
@@ -23,11 +29,6 @@ void ResetTXPacketState(); // defined below, next to BuildTXPacket
 //    // Code to be executed in the new thread
 //}
 
-void ProcessDataThread(int id, void* p) {
-    CRadio* pRadio = (CRadio*)p;
-    pRadio->DataThread();
-    // Code to be executed in the new thread
-}
 
 typedef int PaStreamCallback(const void* input,
     void* output,
@@ -148,6 +149,7 @@ void InitStatus(RadioStatus* s)
 
     for (int i = 0; i < 16; i++) s->AudioFreqPlot[i] = 0.0;
     for (int i = 0; i < 128; i++) s->AudioTimePlot[i] = 0.0;
+    for (int i = 0; i < 64; i++) s->TXAvgPowerPlot[i] = 0.0;
     for (int i = 0; i < 256; i++) s->RFFreqPlot[i] = -20.0;
 
     s->calMode = 0;
@@ -333,8 +335,8 @@ CRadio::CRadio()
     CWPeakCapturing = false;
     CWPeakReady = false;
     CWPeakPendingBin = -1;
-    CWPeakHopAccum = 0;
     CWPeakFreq = 0.0f;
+    CWPeakHopAccum = 0;
 
     // CW multi-tone decode: 8192-point (order 13) complex FFT on a sliding window of wideband
     // (pre-CW-filter) audio, same IPP FFT setup pattern as CW Peaking above. The window slides
@@ -647,9 +649,13 @@ void CRadio::DoRXDSP(bool bypassALC) // 2000 bytes = 250 I/Q = 256 audio
         {
             CWPeakHopAccum -= kCWPeakHopSize;
 
+            float mag[kCWNumBins];
+            bool  masked[kCWNumBins];
+            ComputeCWFFTMag(mag, masked);
+
             int peakBin;
             float peakMag;
-            if (FindCWPeak(&peakBin, &peakMag, CWPeakPendingBin))
+            if (FindCWPeak(mag, masked, kCWPeakBinLo[0], kCWPeakBinHi[0], &peakBin, &peakMag, CWPeakPendingBin))
             {
                 CWPeakFreq = peakBin * (48000.0f / kCWFFTSize);
                 CWPeakCapturing = false;
@@ -834,7 +840,8 @@ void CRadio::ResetCWDecoder()
     cwBPF2_x1 = cwBPF2_x2 = cwBPF2_y1 = cwBPF2_y2 = 0.0f;
 
     cwPeakHopAccum = 0;
-    cwPendingPeakBin = -1;
+    for (int s = 0; s < kCWMaxSlicers; s++) 
+        cwPendingPeakBin[s] = -1;
     // cwSquelch/cwHysteresis are deliberately not touched here - they're user-tunable settings
     // (Radio > CW Squelch.../CW Hysteresis...) and ResetCWDecoder() now runs on every frequency
     // retune, which shouldn't wipe out a manually-chosen value. Only ever initialized in the constructor.
@@ -1067,7 +1074,7 @@ void CRadio::CWTXDataLoop()
 
     ippsFree(env);
 
-    writeData[0] = 'i';
+    writeData[0] = 'u';
     writeData[1] = 'r';
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL);
     myStatus->mode = RX_MODE;
@@ -1100,7 +1107,12 @@ void CRadio::CaptureCWSpectrum(Ipp32f* wideband, int n)
 //    confirm-state (the live decoder passes cwPendingPeakBin, CW Peaking passes its own independent
 //    CWPeakPendingBin - see DoRXDSP) so two callers running at different cadences don't interfere
 //    with each other's confirmation stream.
-bool CRadio::FindCWPeak(int* peakBin, float* peakMag, int& pendingBin)
+// Runs the kCWFFTSize-point peak-search FFT on the current sliding window (Hann-windowed) and fills
+// mag[kCWNumBins] with each in-band bin's magnitude and masked[kCWNumBins] with whether that bin
+// falls within kCWPeakMaskRadius of any currently-tracked slicer's bin (so an existing tone can't
+// inflate the noise floor or be re-detected as new). Computed once per peak-search hop and shared
+// across every slicer's own band-scoped FindCWPeak call below, instead of re-running the FFT per band.
+void CRadio::ComputeCWFFTMag(float* mag, bool* masked)
 {
     for (int i = 0; i < kCWFFTSize; i++)
     {
@@ -1109,7 +1121,6 @@ bool CRadio::FindCWPeak(int* peakBin, float* peakMag, int& pendingBin)
     }
     ippsFFTFwd_CToC_32fc_I(cwFFTData, pCWFFTSpec, pCWFFTWorkBuf);
 
-    float mag[kCWNumBins];
     for (int b = 0; b < kCWNumBins; b++)
     {
         float re = cwFFTData[kCWBinLo + b].re;
@@ -1117,8 +1128,7 @@ bool CRadio::FindCWPeak(int* peakBin, float* peakMag, int& pendingBin)
         mag[b] = sqrtf(re * re + im * im);
     }
 
-    bool masked[kCWNumBins];
-    memset(masked, 0, sizeof(masked));
+    memset(masked, 0, kCWNumBins * sizeof(bool));
     for (int s = 0; s < kCWMaxSlicers; s++)
     {
         if (!cwSlicers[s].used) continue;
@@ -1127,13 +1137,25 @@ bool CRadio::FindCWPeak(int* peakBin, float* peakMag, int& pendingBin)
         int hi = center + kCWPeakMaskRadius; if (hi > kCWNumBins - 1) hi = kCWNumBins - 1;
         for (int b = lo; b <= hi; b++) masked[b] = true;
     }
+}
 
-    // New peaks are only ever looked for in the 600-800 Hz sub-band (kCWPeakBinLo/Hi, in absolute
-    // FFT bins - offset by kCWBinLo to index into mag[]/masked[]); the noise-floor average is scoped
-    // to the same sub-band so the threshold test compares against the actual local noise there
-    // instead of the full 200-2800 Hz capture band.
-    int searchLo = kCWPeakBinLo - kCWBinLo;
-    int searchHi = kCWPeakBinHi - kCWBinLo;
+// Searches [searchLoAbs, searchHiAbs] (absolute FFT bins - one slicer's own fixed sub-band, see
+// kCWPeakBinLo/Hi) of the shared mag[]/masked[] (see ComputeCWFFTMag, run once per peak-search hop)
+// for a new peak: averages the unmasked in-band bins into avgMag, the local noise-floor reference so
+// the threshold test compares against the actual local noise in that band instead of the full
+// 200-2800 Hz capture band, then finds the loudest unmasked in-band bin exceeding avgMag by
+// kCWPeakThresholdDb (loud enough and more than kCWPeakMaskRadius bins from every tracked slicer),
+// then requires it to land within kCWPeakConfirmBins of the *previous* peak-search hop's candidate
+// before reporting it as a confirmed new peak - a single noisy hop can no longer launch a slicer on
+// its own, since a real CW tone persists across consecutive ~kCWPeakHopSize-sample hops while a noise
+// spike generally doesn't land on the same bin twice in a row. pendingBin is the caller's own
+// confirm-state for this band (the live decoder passes its own cwPendingPeakBin[s] per slicer, CW
+// Peaking passes its own independent CWPeakPendingBin - see DoRXDSP) so different bands/callers don't
+// interfere with each other's confirmation stream.
+bool CRadio::FindCWPeak(const float* mag, const bool* masked, int searchLoAbs, int searchHiAbs, int* peakBin, float* peakMag, int& pendingBin)
+{
+    int searchLo = searchLoAbs - kCWBinLo;
+    int searchHi = searchHiAbs - kCWBinLo;
 
     double sum = 0.0;
     int count = 0;
@@ -1197,19 +1219,19 @@ void CRadio::BuildCWDFTTone(Ipp32fc* dest, float freqNorm)
     }
 }
 
-// Only cwSlicers[0] is ever tuned - slots 1..kCWMaxSlicers-1 are kept allocated (struct/array/loops
-// all still in place) but stay permanently unused; this is a deliberate single-active-slicer mode,
-// not a fallback. If a new peak was found this hop (already confirmed by FindCWPeak to be above the
-// average unmasked bin magnitude by kCWPeakThresholdDb, and clear of the tracked slicer's bin), it
-// only claims slot 0 if that slot is unused, or if this peak's magnitude beats the magnitude that
-// slot was last tuned with - i.e. a new candidate only steals the slicer away from whatever it's
-// currently tracking if it's the stronger signal. A weaker candidate is simply ignored and the
-// current tuning is left alone. FindCWPeak's own confirm-bin logic (see cwPendingPeakBin) still
-// resets/re-confirms independently whenever the candidate frequency moves, before any of this
-// amplitude gating ever runs. The claimed slot's 3-tone 512-point correlator (see BuildCWDFTTone) is
-// built once here - on-pitch plus +-kCWDFTBinOffset bins (a Hann(kCWDFTSize) null, so an on-pitch
-// signal doesn't leak into the offset correlators) - and never regenerated again until the slot is
-// reclaimed for a different peak.
+// Each of the kCWMaxSlicers slots is permanently bound to its own fixed search band (see
+// kCWPeakBinLo/Hi/DoCWFFTDecode) - slot s only ever claims a peak found in band s, and holds it
+// indefinitely once claimed. If a new peak was found this hop for slot s (already confirmed by
+// FindCWPeak to be above the average unmasked bin magnitude by kCWPeakThresholdDb, and clear of
+// every tracked slicer's bin), it only claims slot s if that slot is unused, or if this peak's
+// magnitude beats the magnitude that slot was last tuned with - i.e. a new candidate only steals a
+// slicer away from whatever it's currently tracking if it's the stronger signal. A weaker candidate
+// is simply ignored and the current tuning is left alone. FindCWPeak's own confirm-bin logic (see
+// cwPendingPeakBin) still resets/re-confirms independently whenever the candidate frequency moves,
+// before any of this amplitude gating ever runs. The claimed slot's 3-tone 512-point correlator (see
+// BuildCWDFTTone) is built once here - on-pitch plus +-kCWDFTBinOffset bins (a Hann(kCWDFTSize) null,
+// so an on-pitch signal doesn't leak into the offset correlators) - and never regenerated again until
+// the slot is reclaimed for a different peak.
 //
 // Then every used slicer (including one just claimed above) dot-products all 3 tones against the
 // last kCWDFTSize samples of cwFFTSampleWindow - CaptureCWSpectrum, called before this every hop, has
@@ -1240,24 +1262,24 @@ void CRadio::BuildCWDFTTone(Ipp32fc* dest, float freqNorm)
 //    often FindCWPeak itself runs, so timing resolution is unaffected by the slower peak-search
 //    cadence. The active slicer is never freed/timed-out on idle - it only gets retuned when a
 //    stronger peak comes along.
-void CRadio::AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float hopMs)
+void CRadio::AssignCWSlicers(const bool* foundPeak, const int* peakBin, const float* peakMag, float hopMs)
 {
-    if (foundPeak)
+    for (int idx = 0; idx < kCWMaxSlicers; idx++)
     {
-        const int idx = 0; // single active slicer; slots 1..kCWMaxSlicers-1 stay unused
+        if (!foundPeak[idx]) continue;
 
-        if (!cwSlicers[idx].used || peakMag > cwSlicers[idx].peakMag)
+        if (!cwSlicers[idx].used || peakMag[idx] > cwSlicers[idx].peakMag)
         {
             ResetCWSlicer(cwSlicers[idx]);
             cwSlicers[idx].used = true;
-            cwSlicers[idx].binIndex = peakBin;
-            cwSlicers[idx].freqNorm = peakBin / (float)kCWFFTSize;
-            cwSlicers[idx].peakMag = peakMag;
+            cwSlicers[idx].binIndex = peakBin[idx];
+            cwSlicers[idx].freqNorm = peakBin[idx] / (float)kCWFFTSize;
+            cwSlicers[idx].peakMag = peakMag[idx];
 
             // 3-tone 512-point correlator (see BuildCWDFTTone) - on-pitch plus +-kCWDFTBinOffset bins.
             BuildCWDFTTone(cwSlicers[idx].dftTonesOn,   cwSlicers[idx].freqNorm);
-            BuildCWDFTTone(cwSlicers[idx].dftTonesLow,  (peakBin - kCWDFTBinOffset) / (float)kCWFFTSize);
-            BuildCWDFTTone(cwSlicers[idx].dftTonesHigh, (peakBin + kCWDFTBinOffset) / (float)kCWFFTSize);
+            BuildCWDFTTone(cwSlicers[idx].dftTonesLow,  (peakBin[idx] - kCWDFTBinOffset) / (float)kCWFFTSize);
+            BuildCWDFTTone(cwSlicers[idx].dftTonesHigh, (peakBin[idx] + kCWDFTBinOffset) / (float)kCWFFTSize);
         }
     }
 
@@ -1312,7 +1334,8 @@ void CRadio::AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float h
         // signalMag + olderMag covers the full 8-hop window (as two 4-hop coherent sums) to match
         // noiseMag's own 8-hop span - using signalMag alone here under-counted signal energy relative
         // to noise and made signalDetect too easy to drop on a legitimate tone.
-        cwSlicers[s].signalDetect = ((signalMag + olderMag) * cwSquelch) > noiseMag;
+        float adjSquelch = (cwSlicers[s].signalDetect) ? cwSquelch : 0.5 * cwSquelch; // A little hysteresis
+        cwSlicers[s].signalDetect = ((signalMag + olderMag) * adjSquelch) > noiseMag;
 
 
         // Edge detect: diff = |vectorSum(newest 4)| - |vectorSum(oldest 4)| (genuinely bipolar,
@@ -1345,8 +1368,8 @@ void CRadio::AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float h
             if (!cwSlicers[s].signalDetect || trough) isMark = false;
         }
 
-        cwSlicers[s].lastDiff = diff;
         cwSlicers[s].diffRising = risingNow;
+        cwSlicers[s].lastDiff = diff;
 
         if (isMark) cwSlicers[s].hopsSinceMark = 0;
         else        cwSlicers[s].hopsSinceMark++;
@@ -1381,10 +1404,10 @@ void CRadio::RunCWSlicerTiming(CWSlicer& slicer, bool markThisHop, float hopMs)
     // by ~2 hops: it lengthens marks and shortens spaces, so back that out (in opposite directions)
     // before classifying the run. Anything left at zero or below is too short to be real and is
     // dropped as noise instead of being misread as a spurious dot or gap.
- /*   int adjustedHopCount = slicer.markState
-        ? (slicer.stateHopCount - 2)
-        : (slicer.stateHopCount + 2);*/
-    int adjustedHopCount = slicer.stateHopCount;
+    int adjustedHopCount = slicer.markState 
+        ? (slicer.stateHopCount - 1)
+        : (slicer.stateHopCount + 1);
+ //   int adjustedHopCount = slicer.stateHopCount;
 
     PushCWHistory(slicer.markState ? slicer.markLengths : slicer.spaceLengths, adjustedHopCount);
 
@@ -1416,7 +1439,7 @@ void CRadio::RunCWSlicerTiming(CWSlicer& slicer, bool markThisHop, float hopMs)
             // The character itself, if any, was most likely already resolved mid-space above, as
             // soon as the run crossed dotUnitMs*2.25 - this just catches the case where the run was
             // too short for that to have fired, and still appends the word space if warranted.
-            if (durationMs >= slicer.dotUnitMs * 4.75f)
+            if (durationMs >= slicer.dotUnitMs * 6.0f)
             {
                 if (!slicer.resolvedThisSpace) ResolveCWSlicerCharacter(slicer);
                 AppendCWSlicerText(slicer, " ");
@@ -1452,15 +1475,23 @@ void CRadio::DoCWFFTDecode(Ipp32f* wideband, int n)
 {
     CaptureCWSpectrum(wideband, n);
 
-    int peakBin = -1;
-    float peakMag = 0.0f;
-    bool foundPeak = false;
+    bool  foundPeak[kCWMaxSlicers] = {};
+    int   peakBin[kCWMaxSlicers]   = {};
+    float peakMag[kCWMaxSlicers]   = {};
 
     cwPeakHopAccum += n;
     if (cwPeakHopAccum >= kCWPeakHopSize)
     {
         cwPeakHopAccum -= kCWPeakHopSize;
-        foundPeak = FindCWPeak(&peakBin, &peakMag, cwPendingPeakBin);
+
+        // One shared FFT (see ComputeCWFFTMag) per peak-search hop; each slicer then searches only
+        // its own fixed sub-band (kCWPeakBinLo/Hi) of that same mag[]/masked[] for a new peak.
+        float mag[kCWNumBins];
+        bool  masked[kCWNumBins];
+        ComputeCWFFTMag(mag, masked);
+
+        for (int s = 0; s < kCWMaxSlicers; s++)
+            foundPeak[s] = FindCWPeak(mag, masked, kCWPeakBinLo[s], kCWPeakBinHi[s], &peakBin[s], &peakMag[s], cwPendingPeakBin[s]);
     }
 
     float hopMs = n * 1000.0f / 48000.0f;
@@ -1481,7 +1512,7 @@ void CRadio::UpdateADCs(char * readData)
  //       int g = 0;
 
 	int val = ((readData[0] - 0x20) << 6) | (readData[1] - 0x20);
-    myStatus->volts =  (36.3 / 4096.0)* val;
+    myStatus->volts =  (52.9 / 4096.0)* val;
 	val = ((readData[2] - 0x20) << 6) | (readData[3] - 0x20);
  //   myStatus->amps = (66.0 / 4096.0) * val;
     myStatus->amps = (66.0 / 8192.0)* val;
@@ -1500,11 +1531,6 @@ void CRadio::RXDataLoop()
     int ALCCounter = 0;
 
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR); 
-
-    writeData[0] = 'a'; // ADC payload
-    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // query adc values once
-    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
-    UpdateADCs(readData); 
 
     for (int i = 0; i < 8; i++)
         writeData[i] = 'b'; // Let's make 'b' send 250 I/Q, our processing size
@@ -1560,37 +1586,40 @@ void fabsxoveroneplusx(float* inPlaceData)
     for (int i = 0; i < 256; i++) inPlaceData[i] = inPlaceData[i] / (1.0 + fabs(inPlaceData[i]));
 }
 
-//bool DEBUG_BUF_GENERATED = false;
-//Ipp32f* pTwoToneAudio;
+bool DEBUG_BUF_GENERATED = false;
+Ipp32f* pTwoToneAudio;
 void CRadio::Get1280AudioSamples(float gain)
 {
-    //if (!DEBUG_BUF_GENERATED)
-    //{
-    //    pTwoToneAudio = ippsMalloc_32f(256);
-    //    for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
-    //    //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 5 * i / 256) + 0.4999 * cos(IPP_2PI * 6 * i / 256);
-    //    //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.9999 * sin(IPP_2PI * 8 * i / 256) ;
-    //    DEBUG_BUF_GENERATED = true;
-    //}
+    if (!DEBUG_BUF_GENERATED)
+    {
+        pTwoToneAudio = ippsMalloc_32f(256);
+        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
+        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 5 * i / 256) + 0.4999 * cos(IPP_2PI * 6 * i / 256);
+        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.9999 * sin(IPP_2PI * 6 * i / 256) ;
+        DEBUG_BUF_GENERATED = true;
+    }
 
     if (gUseDebugWaveform)
     {
         // Two-tone debug signal: 0.017 + 0.027, each at 0.5 amplitude.
         // Each tone is split into 1024 + 256 calls so the persistent phases
         // advance by 1024 samples (matching the audioInRdPtr stride), not 1280.
-        Ipp32f toneBuf[1280];
+        //Ipp32f toneBuf[1280];
 
-        // Tone 1 (0.017) into resampledAudioIn
-        ippsTone_32f(resampledAudioIn,       1024, 0.5f, 0.017f, &debugTonePhase,  ippAlgHintFast);
-        Ipp32f tmp1 = debugTonePhase;
-        ippsTone_32f(resampledAudioIn + 1024, 256, 0.5f, 0.017f, &tmp1,            ippAlgHintFast);
+        //// Tone 1 (0.017) into resampledAudioIn
+        //ippsTone_32f(resampledAudioIn,       1024, 0.5f, 0.017f, &debugTonePhase,  ippAlgHintFast);
+        //Ipp32f tmp1 = debugTonePhase;
+        //ippsTone_32f(resampledAudioIn + 1024, 256, 0.5f, 0.017f, &tmp1,            ippAlgHintFast);
 
-        // Tone 2 (0.027) into temp buffer, then add to resampledAudioIn
-        ippsTone_32f(toneBuf,       1024, 0.5f, 0.027f, &debugTonePhase2, ippAlgHintFast);
-        Ipp32f tmp2 = debugTonePhase2;
-        ippsTone_32f(toneBuf + 1024, 256, 0.5f, 0.027f, &tmp2,           ippAlgHintFast);
+        //// Tone 2 (0.027) into temp buffer, then add to resampledAudioIn
+        //ippsTone_32f(toneBuf,       1024, 0.5f, 0.027f, &debugTonePhase2, ippAlgHintFast);
+        //Ipp32f tmp2 = debugTonePhase2;
+        //ippsTone_32f(toneBuf + 1024, 256, 0.5f, 0.027f, &tmp2,           ippAlgHintFast);
+        
+        for (int i = 0; i < 1280; i += 256)
+            ippsCopy_32f(pTwoToneAudio, &resampledAudioIn[i], 256);
 
-        ippsAdd_32f_I(toneBuf, resampledAudioIn, 1280);
+        //ippsAdd_32f_I(toneBuf, resampledAudioIn, 1280);
     }
     else
     {
@@ -1643,15 +1672,10 @@ static void BandpassOneSided(Ipp32fc* pData)
 }
 
 int debug_xyz = 0;
-int g_min_amp = 32;
-int g_max_amp = 240;
-int g_abs_max_amp = 276;
+int g_min_amp = 19;// 32;
+int g_max_amp = 200;// 240;
+int g_abs_max_amp = 230;// 276;
 
-#define DBG_MAX_AMP 250 // 70 seems to be 10% output 250 = 166W. 280 = 207W
-//#define DBG_MAX_AMP 210 // 70 seems to be 10% output
-#define DBG_MIN_AMP 40 // off below this setting
-//#define DBG_MAX_AMP 30 // 30 is barely on
-//#define DBG_MIN_AMP 25 // 28 is barely off
 static int gTXPacketLastPhase = 0;
 static float gTXPacketRemainder = 0.0f;
 
@@ -1663,6 +1687,17 @@ void ResetTXPacketState()
 {
     gTXPacketLastPhase = 0;
     gTXPacketRemainder = 0.0f;
+}
+
+void BuildEmptyPacket(char* wd)
+{
+    for (int i = 0; i < 32; i++)
+    {
+        *(wd++) = 0x20;
+        *(wd++) = 0x20;
+        *(wd++) = 0x20;
+        *(wd++) = 0x20 + g_min_amp;
+    }
 }
 
 void BuildTXPacket(char* wd, Ipp32fc* pIQ)
@@ -1691,6 +1726,7 @@ void BuildTXPacket(char* wd, Ipp32fc* pIQ)
 
         if (amp > g_abs_max_amp) amp = g_abs_max_amp; // max is 1.0, abs max is just below modulator clipping
         if (amp < 0) amp = 0;
+        
         amp += g_min_amp; // this is "barely off"
 
         *(wd++) = 0x20 + (delta >> 6);
@@ -1785,18 +1821,18 @@ void CRadio::InitCESSB()
     ippsZero_32fc(cessbCplxOverlap1, CESSB_OVERLAP);
     ippsZero_32fc(cessbCplxOverlap2, CESSB_OVERLAP);
     ippsZero_32fc(cessbCplxOverlap3, CESSB_OVERLAP);
-    txHPF_x1 = txHPF_x2 = txHPF_y1 = txHPF_y2 = 0.0f;
-    txLPF_x1 = txLPF_x2 = txLPF_y1 = txLPF_y2 = 0.0f;
     debugTonePhase  = 0.0f;
     debugTonePhase2 = 0.0f;
 }
 
-// Process 1280 real audio samples into 1280 complex analytic SSB samples (CESSB).
+// Real audio -> bandpass-filtered analytic signal via Hilbert transform (overlap-save, 2048-pt FFT).
+// This is CESSB's own passband (300-2695 Hz) and is also used, standalone, as the TX audio
+// prefilter in TXDataLoop (replacing the old biquad HPF/LPF) so AGC's peak measurement and CESSB's
+// clip/filter iterations both work from the same already-analytic, band-limited signal.
 // pIn  : 1280 real audio samples at 48 kHz (normalized, peak <= 1.0 recommended)
-// pOut : 1280 Ipp32fc analytic SSB baseband signal; Re(pOut) is the SSB audio
-void CRadio::ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut)
+// pOut : 1280 Ipp32fc analytic baseband signal; Re(pOut) is the bandpass-filtered audio
+void CRadio::ApplyCESSBBandpass(Ipp32f* pIn, Ipp32fc* pOut)
 {
-    // --- Stage 1: real audio -> bandpass-filtered analytic signal via Hilbert ---
     // Build 2048-sample complex block from [768 real history | 1280 new samples]
     for (int i = 0; i < CESSB_OVERLAP; i++)
         cessbWorkBuf[i] = { cessbRealOverlap[i], 0.0f };
@@ -1810,36 +1846,42 @@ void CRadio::ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut)
     ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
     // Discard the first 768 overlap samples; the last 1280 are the valid output
     ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+}
 
+// Iteratively clips the envelope of an already-analytic signal (see ApplyCESSBBandpass) and
+// re-applies the bandpass to remove clipping artifacts, 3 times over, in place.
+// pInOut : 1280 Ipp32fc analytic baseband signal; Re(pInOut) is the CESSB SSB audio
+void CRadio::ProcessCESSB(Ipp32fc* pInOut)
+{
     // --- Iteration 1: clip envelope, re-apply bandpass to remove clipping artifacts ---
-    ClipEnvelope(pOut, CESSB_BLOCK);
+    ClipEnvelope(pInOut, CESSB_BLOCK);
     ippsCopy_32fc(cessbCplxOverlap1, cessbWorkBuf, CESSB_OVERLAP);
-    ippsCopy_32fc(pOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
-    ippsCopy_32fc(pOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap1, CESSB_OVERLAP);
+    ippsCopy_32fc(pInOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
+    ippsCopy_32fc(pInOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap1, CESSB_OVERLAP);
     ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
     ApplyComplexBandpass(cessbWorkBuf);
     ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
-    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pInOut, CESSB_BLOCK);
 
     // --- Iteration 2: second clip + bandpass for further PAPR reduction ---
-    ClipEnvelope(pOut, CESSB_BLOCK);
+    ClipEnvelope(pInOut, CESSB_BLOCK);
     ippsCopy_32fc(cessbCplxOverlap2, cessbWorkBuf, CESSB_OVERLAP);
-    ippsCopy_32fc(pOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
-    ippsCopy_32fc(pOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap2, CESSB_OVERLAP);
+    ippsCopy_32fc(pInOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
+    ippsCopy_32fc(pInOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap2, CESSB_OVERLAP);
     ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
     ApplyComplexBandpass(cessbWorkBuf);
     ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
-    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pInOut, CESSB_BLOCK);
 
     // --- Iteration 3: third clip + bandpass to catch residual overshoot ---
-    ClipEnvelope(pOut, CESSB_BLOCK);
+    ClipEnvelope(pInOut, CESSB_BLOCK);
     ippsCopy_32fc(cessbCplxOverlap3, cessbWorkBuf, CESSB_OVERLAP);
-    ippsCopy_32fc(pOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
-    ippsCopy_32fc(pOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap3, CESSB_OVERLAP);
+    ippsCopy_32fc(pInOut, cessbWorkBuf + CESSB_OVERLAP, CESSB_BLOCK);
+    ippsCopy_32fc(pInOut + CESSB_BLOCK - CESSB_OVERLAP, cessbCplxOverlap3, CESSB_OVERLAP);
     ippsFFTFwd_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
     ApplyComplexBandpass(cessbWorkBuf);
     ippsFFTInv_CToC_32fc_I(cessbWorkBuf, cessbFFTSpec, cessbFFTWorkBuf);
-    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pOut, CESSB_BLOCK);
+    ippsCopy_32fc(cessbWorkBuf + CESSB_OVERLAP, pInOut, CESSB_BLOCK);
 }
 
 DWORD GetBytesAvailable(HANDLE hComm) {
@@ -1857,13 +1899,17 @@ void CRadio::TXDataLoop()
     char writeData[132]; // 1 header + 32 IQ pairs × 4 bytes = 129 bytes
     char readData[64];
     DWORD bytesWritten = 0;
-    float agcGain           = 1.0f;
+    float agcGain           = 4.0f;
     const float agcMinGain  = 1.0f;
     const float agcAttack   = 0.41f;    // per-block attack  (~50 ms at 1280/48k blocks)
     const float agcRelease  = 0.065f;   // per-block release (~400 ms)
     int txPacketCount = 0;
 
-    Ipp32fc * TXIFFTAccum = ippsMalloc_32fc(3072); 
+//    FILE* f;
+//    fopen_s(&f, "avgpower.csv", "w");
+
+    Ipp32fc * TXIFFTAccum = ippsMalloc_32fc(3072);
+    Ipp32f * pTXPowerScratch = ippsMalloc_32f(2048); // scratch for average-power limiter below
 
     // Query to get buffer sizes
     int sizeTFFTSpec, sizeTFFTInitBuf, sizeTFFTWorkBuf;
@@ -1914,27 +1960,17 @@ void CRadio::TXDataLoop()
             audioInRdPtr += 1024;
             if (audioInRdPtr >= 16384) audioInRdPtr -= 16384;
 
-            // Bandpass filter: 2nd-order Butterworth HPF (300 Hz) cascaded with LPF (3 kHz).
-            // Applied in-place so both AGC and CESSB see only in-band audio.
-            // Coefficients computed via bilinear transform at 48 kHz.
-            static const float hb0= 0.97256f, hb1=-1.94512f, hb2= 0.97256f; // HPF 300 Hz
-            static const float ha1=-1.94436f, ha2= 0.94583f;
-            static const float lb0= 0.02996f, lb1= 0.05991f, lb2= 0.02996f; // LPF 3 kHz
-            static const float la1=-1.45427f, la2= 0.57413f;
-            for (int i = 0; i < CESSB_BLOCK; i++) {
-                float xh = resampledAudioIn[i];
-                float yh = hb0*xh + hb1*txHPF_x1 + hb2*txHPF_x2 - ha1*txHPF_y1 - ha2*txHPF_y2;
-                txHPF_x2 = txHPF_x1; txHPF_x1 = xh;
-                txHPF_y2 = txHPF_y1; txHPF_y1 = yh;
-                float yl = lb0*yh + lb1*txLPF_x1 + lb2*txLPF_x2 - la1*txLPF_y1 - la2*txLPF_y2;
-                txLPF_x2 = txLPF_x1; txLPF_x1 = yh;
-                txLPF_y2 = txLPF_y1; txLPF_y1 = yl;
-                resampledAudioIn[i] = yl;
-            }
+            // Bandpass filter: analytic (Hilbert) bandpass, same overlap-save FFT stage ProcessCESSB's
+            // clip/filter iterations reuse below - applied here up front so AGC's peak measurement
+            // and CESSB both work from the same already band-limited (300-2695 Hz) analytic signal.
+            ApplyCESSBBandpass(resampledAudioIn, cessbOut);
 
-            // AGC: measure peak of gained block, update agcGain for next block
+            // AGC: measure peak envelope magnitude of the (already band-limited) analytic signal,
+            // update agcGain for next block
+            Ipp32f cessbMag[CESSB_BLOCK];
+            ippsMagnitude_32fc(cessbOut, cessbMag, CESSB_BLOCK);
             Ipp32f peakLevel;
-            ippsMaxAbs_32f(resampledAudioIn, 1280, &peakLevel);
+            ippsMax_32f(cessbMag, CESSB_BLOCK, &peakLevel);
             if (peakLevel > 0.001f)
             {
                 float desired = agcGain * agcTarget / peakLevel;
@@ -1943,15 +1979,12 @@ void CRadio::TXDataLoop()
                 agcGain += coeff * (desired - agcGain);
             }
 
-            // CESSB: real audio -> complex analytic SSB, then resample I and Q separately
+            // CESSB: clip + reapply bandpass in place, then split into I/Q for resampling
 #ifdef ENABLE_CESSB
-            ProcessCESSB(resampledAudioIn, cessbOut);
+            ProcessCESSB(cessbOut);
+#endif
             for (int i = 0; i < CESSB_BLOCK; i++)
                 { cessbI[i] = cessbOut[i].re; cessbQ[i] = cessbOut[i].im; }
-#else
-            ippsCopy_32f(resampledAudioIn, cessbI, CESSB_BLOCK);
-            ippsZero_32f(cessbQ, CESSB_BLOCK);
-#endif
 
             int newSampleCount = 0, newSampleCountQ = 0;
             Ipp64f timeQ = time;
@@ -1968,7 +2001,36 @@ void CRadio::TXDataLoop()
             {
                 Ipp32f* pI = &resampledAudioOut[sendSampleCount];
                 Ipp32f* pQ = &resampledAudioOutQ[sendSampleCount];
+
+                // Average-power limiter: samples are normalized to peak <= 1.0 (max power = 1.0),
+                // so if this block's average power exceeds 35% of that, scale I/Q down instead of
+                // copying unmodified - a coarser, block-level backstop on top of CESSB's per-sample
+                // envelope clipping.
+                Ipp32f sumI2, sumQ2;
+                ippsSqr_32f(pI, pTXPowerScratch, 2048);
+                ippsSum_32f(pTXPowerScratch, 2048, &sumI2, ippAlgHintFast);
+                ippsSqr_32f(pQ, pTXPowerScratch, 2048);
+                ippsSum_32f(pTXPowerScratch, 2048, &sumQ2, ippAlgHintFast);
+                float avgPower = (sumI2 + sumQ2) / 2048.0f;
+                float peakPower = peakLevel * peakLevel;
+
+ //               fprintf(f, "%.3f,%.3f,%.3f\n", avgPower, peakPower, agcGain);
+
+                // Scroll avgPower (pre-cap) into the TX plot history, oldest at [0], newest at [63]
+                memmove(myStatus->TXAvgPowerPlot, myStatus->TXAvgPowerPlot + 1, 63 * sizeof(float));
+                myStatus->TXAvgPowerPlot[63] = avgPower;
+
                 for (int s = 0; s < 2048; s++) TXFFTData[s] = { pI[s], pQ[s] };
+ /*               if (avgPower > 0.6f)
+                {
+                    float scale = sqrtf(0.6f / avgPower);
+                    for (int s = 0; s < 2048; s++) TXFFTData[s] = { pI[s] * scale, pQ[s] * scale };
+                }
+                else
+                {
+                }*/
+
+
                 //window
                 ippsMul_32f32fc_I(TXHannWindow, TXFFTData, 2048);
                 //FFT
@@ -1977,17 +2039,6 @@ void CRadio::TXDataLoop()
                 BandpassOneSided(TXFFTData);
                 //Back to time domain
                 ippsFFTInv_CToC_32fc_I(TXFFTData, pTFFTSpec, pTFFTWorkBuf);
-
-                //Now we have 3 IFFTs ready to overlap-add
-                // When we add them, we will likely exceed 1.0 meaning we'll have to scale both of them back.
-                // Once we know how much to scale back, we have enough information to send the last one. 
-                // IFFTAccumRe is 768. This stores the two previous IFFTs. 0-255 working buffer
-
-                //We need to save full previous IFFT (B), and newest half of IFFT before that (A).
-                //Essentially this is the 3rd IFFT (C), used to compute the gain of the 2nd. The 1st was scaled last time.
-                //The 2nd will be scaled this time. Then the new 1/2 of 1st and old 1/2 of 2nd make IQ
-                //memcpy(DebugStuff, TXIFFTAccum, 3072 * 8);
-                //nope
 
                 ippsAdd_32fc_I(&TXIFFTAccum[1024], TXIFFTAccum, 1024);  // A + B => output
                 if (txPacketCount == 0)
@@ -2050,6 +2101,12 @@ void CRadio::TXDataLoop()
         WriteFile(hSerial, writeData, 129, &bytesWritten, NULL);
     }
 
+    // Finish with 128, 0's after taper
+    for (int s = 0; s < 4; s++)
+    {
+        BuildEmptyPacket(writeData);
+        WriteFile(hSerial, writeData, 129, &bytesWritten, NULL);
+    }
     //Dump residual ADC data if any
     //Sleep(16);
     //if (ADCWaitingCounter)
@@ -2059,14 +2116,27 @@ void CRadio::TXDataLoop()
 
     //Put back in receive mode
 
+ //   fclose(f);
+
     ippsFree(TXIFFTAccum);
+    ippsFree(pTXPowerScratch);
     ippsFree(pTFFTSpecBuf);
     ippsFree(pTFFTWorkBuf);
  //   ippsFree(pTFFTSpec);
 
-    writeData[0] = 'i';
+//    writeData[0] = 'i';
+    writeData[0] = 'u'; // New command to flush before idle
     writeData[1] = 'r';
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); 
+
+    Sleep(100); // Wait for data to finish
+    PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+
+    writeData[0] = 'a'; // ADC payload
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // query adc values once
+    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
+    UpdateADCs(readData);
+
     myStatus->mode = RX_MODE;
 }
 
@@ -2592,8 +2662,10 @@ int CRadio::SetFreq(double freqMHz)
 {
     char writeData[8];
     DWORD bytesWritten = 0;
-    if (freqMHz < 14.000) freqMHz = 14.000;
-    if (freqMHz > 14.350) freqMHz = 14.350;
+    double loLimit = gUseDebugWaveform ? 13.000 : 14.000;
+    double hiLimit = gUseDebugWaveform ? 15.000 : 14.350;
+    if (freqMHz < loLimit) freqMHz = loLimit;
+    if (freqMHz > hiLimit) freqMHz = hiLimit;
     LOfreq = freqMHz;
     m_iFreq = (int)round(LOfreq * 1000000.0);
     writeData[0] = 'f';

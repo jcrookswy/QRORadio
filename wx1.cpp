@@ -579,8 +579,16 @@ void BasicDrawPane::render(wxDC& dc)
             wchar_t plot3Label[20] = _T("Audio (freq) 1kHz/");
             Plot(dc, x1, midY, plotW, midH, 16, pRadio->myStatus->AudioFreqPlot, 0.0, 1.0, 4, 3, plot3Label);
 
-            wchar_t plot4Label[20] = _T("Audio (time) 1ms/");
-            Plot(dc, x2, midY, plotW, midH, 128, pRadio->myStatus->AudioTimePlot, -1.0, 1.0, 4, 5, plot4Label);
+            if (pRadio->myStatus->mode == TX_MODE)
+            {
+                wchar_t plot4Label[24] = _T("TX Avg Power 0.2/");
+                Plot(dc, x2, midY, plotW, midH, 64, pRadio->myStatus->TXAvgPowerPlot, 0.0, 1.0, 5, 5, plot4Label);
+            }
+            else
+            {
+                wchar_t plot4Label[20] = _T("Audio (time) 1ms/");
+                Plot(dc, x2, midY, plotW, midH, 128, pRadio->myStatus->AudioTimePlot, -1.0, 1.0, 4, 5, plot4Label);
+            }
         }
     }
 
@@ -1030,6 +1038,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     radioMenu->Append(ID_CW_SQUELCH, _("CW &Squelch..."));
     radioMenu->Append(ID_CW_HYSTERESIS, _("CW &Hysteresis..."));
     radioMenu->AppendSeparator();
+    radioMenu->Append(ID_MAX_AMP, _("Max &Amp..."));
+    radioMenu->AppendSeparator();
     radioMenu->Append(ID_PLOT_SETTINGS, _("&Plot Settings..."));
     menuBar->Append(radioMenu, _("&Radio"));
     wxMenu* audioMenu = new wxMenu();
@@ -1045,6 +1055,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnCWMode,       this, ID_CW_MODE);
     Bind(wxEVT_MENU, &MyFrame::OnCWSquelch,    this, ID_CW_SQUELCH);
     Bind(wxEVT_MENU, &MyFrame::OnCWHysteresis, this, ID_CW_HYSTERESIS);
+    Bind(wxEVT_MENU, &MyFrame::OnMaxAmp,       this, ID_MAX_AMP);
     Bind(wxEVT_MENU, &MyFrame::OnSweepOpen,  this, ID_SWEEP_OPEN);
     Bind(wxEVT_MENU, &MyFrame::OnSweepShort, this, ID_SWEEP_SHORT);
     Bind(wxEVT_MENU, &MyFrame::OnSweepLoad,  this, ID_SWEEP_LOAD);
@@ -1422,6 +1433,18 @@ void MyFrame::OnCWHysteresis(wxCommandEvent& event)
     }
 }
 
+void MyFrame::OnMaxAmp(wxCommandEvent& event)
+{
+    long val = wxGetNumberFromUser(
+        _("Max TX amplitude code (0-260):"),
+        _("Max Amp:"),
+        _("Max Amp"),
+        g_max_amp, 0, 260, this);
+    if (val < 0) return;
+    g_max_amp = (int)val;
+    g_abs_max_amp = (int)round(1.15 * g_max_amp);
+}
+
 void MyFrame::OnPlotSettings(wxCommandEvent& event)
 {
     long val;
@@ -1589,8 +1612,10 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     wxString value = m_textCtrl1->GetValue();
     double freq;
     value.ToDouble(&freq);
-    if (freq < 14.000) freq = 14.000;
-    if (freq > 14.350) freq = 14.350;
+    double loLimit = gUseDebugWaveform ? 13.000 : 14.000;
+    double hiLimit = gUseDebugWaveform ? 15.000 : 14.350;
+    if (freq < loLimit) freq = loLimit;
+    if (freq > hiLimit) freq = hiLimit;
     myRadio->LOfreq = freq;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
@@ -1601,7 +1626,7 @@ void MyFrame::B7Click(wxCommandEvent& event) // Step down
 {
     myRadio->LOfreq -= myRadio->stepSize / 1.0e6;
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
-    if (myRadio->LOfreq < 14.000) myRadio->LOfreq = 14.000;
+    if (myRadio->LOfreq < (gUseDebugWaveform ? 13.000 : 14.000)) myRadio->LOfreq = gUseDebugWaveform ? 13.000 : 14.000;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
@@ -1611,7 +1636,7 @@ void MyFrame::B8Click(wxCommandEvent& event) // Step up
 {
     myRadio->LOfreq += myRadio->stepSize / 1.0e6;
     myRadio->LOfreq = round(myRadio->LOfreq * 10000.0) / 10000.0;
-    if (myRadio->LOfreq > 14.350) myRadio->LOfreq = 14.350;
+    if (myRadio->LOfreq > (gUseDebugWaveform ? 15.000 : 14.350)) myRadio->LOfreq = gUseDebugWaveform ? 15.000 : 14.350;
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
@@ -1657,6 +1682,7 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
             }
 
             myRadio->myStatus->mode = 2;
+            return;
         }
         if (key == 'R') { myRadio->myStatus->mode = RX_MODE; return; }
         if (key == WXK_RIGHT) { wxCommandEvent dummy; B8Click(dummy); return; }
@@ -1666,8 +1692,8 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
             double fine = myRadio->stepSize / 10.0 / 1.0e6;
             myRadio->LOfreq += (key == WXK_UP) ? fine : -fine;
             myRadio->LOfreq = round(myRadio->LOfreq * 100000.0) / 100000.0;
-            if (myRadio->LOfreq < 14.000) myRadio->LOfreq = 14.000;
-            if (myRadio->LOfreq > 14.350) myRadio->LOfreq = 14.350;
+            if (myRadio->LOfreq < (gUseDebugWaveform ? 13.000 : 14.000)) myRadio->LOfreq = gUseDebugWaveform ? 13.000 : 14.000;
+            if (myRadio->LOfreq > (gUseDebugWaveform ? 15.000 : 14.350)) myRadio->LOfreq = gUseDebugWaveform ? 15.000 : 14.350;
             m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
             myRadio->NewLOFreq = true;
             myRadio->myStatus->UpdateText = true;

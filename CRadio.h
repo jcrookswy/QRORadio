@@ -3,7 +3,11 @@
 #include <complex>
 #include <thread>
 #include <windows.h>
-#include <ipp.h>
+#include <ipp.h>  
+
+extern bool gUseDebugWaveform;
+extern int g_max_amp;
+extern int g_abs_max_amp;
 
 //modes
 //0 = IDLE
@@ -43,6 +47,7 @@ struct RadioStatus {
 	char GMTTime[16];
 	float AudioFreqPlot[16];
 	float AudioTimePlot[128];
+	float TXAvgPowerPlot[64];  // scrolling history of TX average power per 2048-sample chunk, pre-limiter (0.0-1.0)
 	float RFFreqPlot[256];
 	bool UpdateText;
 	bool UpdateAudio;
@@ -226,9 +231,13 @@ public:
 	static const int kCWBinLo    = 35;                      // ceil(200 / (48000/8192))
 	static const int kCWBinHi    = 477;                     // floor(2800 / (48000/8192))
 	static const int kCWNumBins  = kCWBinHi - kCWBinLo + 1; // 443
-	static const int kCWPeakBinLo = 103;                    // ceil(600 / (48000/8192)) - FindCWPeak only
-	static const int kCWPeakBinHi = 136;                    // floor(800 / (48000/8192)) - searches this band
 	static const int kCWMaxSlicers        = 4;
+	// Per-slicer new-peak search sub-band, in absolute FFT bins (see FindCWPeak) - slicer s only ever
+	// hunts for new peaks within [kCWPeakBinLo[s], kCWPeakBinHi[s]], and only retunes within that same
+	// band (see AssignCWSlicers); contiguous 600-800/800-1400/1400-2100/2100-2800 Hz quarters of the
+	// wider 200-2800 Hz capture band (kCWBinLo/kCWBinHi above).
+	static constexpr int kCWPeakBinLo[kCWMaxSlicers] = { 103, 137, 239, 359 };
+	static constexpr int kCWPeakBinHi[kCWMaxSlicers] = { 136, 238, 358, 477 };
 	static const int kCWPeakMaskRadius    = 10;              // bins excluded around each tracked slicer ("more than 3 bins" away is a valid new peak)
 	static constexpr float kCWPeakThresholdDb = 10.0f;      // new peak must exceed the average unmasked-bin magnitude by this many dB
 	static const int kCWPeakConfirmBins  = 2;               // a candidate peak must land within this many bins of the previous peak-search hop's candidate before a slicer is launched
@@ -252,7 +261,7 @@ public:
 	Ipp8u*   pCWFFTSpecBuf;
 	Ipp8u*   pCWFFTWorkBuf;
 	int      cwPeakHopAccum;      // samples accumulated since the last big-FFT peak search; fires FindCWPeak at kCWPeakHopSize
-	int      cwPendingPeakBin;    // unconfirmed candidate bin from the previous peak-search hop, or -1; see FindCWPeak
+	int      cwPendingPeakBin[kCWMaxSlicers]; // per-slicer unconfirmed candidate bin from the previous peak-search hop, or -1; see FindCWPeak
 
 	// Per-slicer reference-tone amplitude (see BuildCWDFTTone): just needs to keep the correlator's
 	// output in a sane float range (not underflowing/overflowing) - the edge-detect mark/space
@@ -269,8 +278,9 @@ public:
 	CWSlicer cwSlicers[kCWMaxSlicers];
 
 	void CaptureCWSpectrum(Ipp32f* wideband, int n);
-	bool FindCWPeak(int* peakBin, float* peakMag, int& pendingBin);
-	void AssignCWSlicers(bool foundPeak, int peakBin, float peakMag, float hopMs);
+	void ComputeCWFFTMag(float* mag, bool* masked);
+	bool FindCWPeak(const float* mag, const bool* masked, int searchLoAbs, int searchHiAbs, int* peakBin, float* peakMag, int& pendingBin);
+	void AssignCWSlicers(const bool* foundPeak, const int* peakBin, const float* peakMag, float hopMs);
 	void BuildCWDFTTone(Ipp32fc* dest, float freqNorm);
 	void RunCWSlicerTiming(CWSlicer& slicer, bool markThisHop, float hopMs);
 	void AppendCWSlicerText(CWSlicer& slicer, const char* s);
@@ -342,7 +352,8 @@ public:
 	void QuickSync();
 
 	void InitCESSB();
-	void ProcessCESSB(Ipp32f* pIn, Ipp32fc* pOut);
+	void ApplyCESSBBandpass(Ipp32f* pIn, Ipp32fc* pOut);
+	void ProcessCESSB(Ipp32fc* pInOut);
 
 	IppsFFTSpec_C_32fc* pFFTSpec;
 	Ipp8u* pFFTSpecBuf, * pFFTWorkBuf;
@@ -350,10 +361,6 @@ public:
 	Ipp32fc* IFFTData;// = new Ipp32fc[16000];
 	Ipp32fc* IFFTAccum;// = new Ipp32fc[16000];
 	Ipp32f* RawAudio;
-
-	// TX audio bandpass filter state (300 Hz HPF + 3 kHz LPF, reset each PTT)
-	float txHPF_x1, txHPF_x2, txHPF_y1, txHPF_y2;
-	float txLPF_x1, txLPF_x2, txLPF_y1, txLPF_y2;
 
 	Ipp32f debugTonePhase;  // persistent phase for debug tone 1
 	Ipp32f debugTonePhase2; // persistent phase for debug tone 2

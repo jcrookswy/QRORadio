@@ -115,6 +115,7 @@ enum {
     ID_CW_MODE,
     ID_CW_SQUELCH,
     ID_CW_HYSTERESIS,
+    ID_MAX_AMP,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -187,6 +188,7 @@ public:
     void OnCWMode(wxCommandEvent& event);
     void OnCWSquelch(wxCommandEvent& event);
     void OnCWHysteresis(wxCommandEvent& event);
+    void OnMaxAmp(wxCommandEvent& event);
     void BLogClick(wxCommandEvent& event);
     void BSyncClick(wxCommandEvent& event);
     void BViewLogClick(wxCommandEvent& event);
