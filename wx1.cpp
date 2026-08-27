@@ -535,6 +535,9 @@ void BasicDrawPane::render(wxDC& dc)
         else
             sprintf_s(voltText, "%.1fV %.0fW", pRadio->myStatus->volts, watts);
         mbstowcs(txText, voltText, 16);
+        float lowBattThresh = pRadio->is8S ? 28.0f : 21.0f; // 3.5V/cell, 8S or 6S
+        if (pRadio->myStatus->volts < lowBattThresh)
+            dc.SetTextForeground(wxColor(255, 64, 64));
         xofs += extraGap + PrettyText(dc, xofs, 5, 10, txText, textScale);
 
         dc.SetTextForeground(wxColor(128, 255, 128));

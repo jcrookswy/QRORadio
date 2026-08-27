@@ -971,6 +971,7 @@ void CRadio::StartCWTransmit(const char* text)
 void CRadio::CWTXDataLoop()
 {
     char writeData[132]; // 1 header + 32 IQ pairs x 4 bytes = 129 bytes
+    char readData[64];
     DWORD bytesWritten = 0;
 
     int envCount = 0;
@@ -984,6 +985,9 @@ void CRadio::CWTXDataLoop()
     ippsResamplePolyphaseInit_32f(128, 32, 0.4, 4.0, resample_state_q, ippAlgHintAccurate);
 
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+
+    SetRXBits(RelaySettings);
+    Sleep(16);
 
     writeData[0] = 't'; // Transmit mode
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL);
@@ -1077,6 +1081,26 @@ void CRadio::CWTXDataLoop()
     writeData[0] = 'u';
     writeData[1] = 'r';
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL);
+
+    writeData[0] = 'a'; // ADC payload
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // query adc values once
+    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
+    UpdateADCs(readData);
+
+    // Same voltage-based ratchet as TXDataLoop - see there for why it's one-way and volts>0 guarded.
+    if (myStatus->volts > 0.0f)
+    {
+        int voltLimitedMax = (int)floor(myStatus->volts / 31.0f * 260.0f + 0.5f);
+        if (voltLimitedMax < g_max_amp)
+        {
+            g_max_amp = voltLimitedMax;
+            g_abs_max_amp = (int)round(1.15 * g_max_amp);
+        }
+    }
+
+    SetRXBits(0);
+    Sleep(16);
+
     myStatus->mode = RX_MODE;
 }
 
@@ -1944,6 +1968,9 @@ void CRadio::TXDataLoop()
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
     InitCESSB(); // Clear overlap history so each transmission starts clean
 
+    SetRXBits(RelaySettings);
+    Sleep(16);
+
     writeData[0] = 't'; // Transmit mode
     WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // queue up 8 * 250 IQ values
     Sleep(32);//Wait for command / relays
@@ -2137,6 +2164,24 @@ void CRadio::TXDataLoop()
     ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
     UpdateADCs(readData);
 
+    // Ratchet g_max_amp down (never up - that only happens via the Max Amp dialog) so the next
+    // transmission can't drive the modulator harder than this battery voltage supports, keeping
+    // ~1V of headroom below the ~30V/260 hardware ceiling. Skip on an implausible (<=0) reading -
+    // a disconnected/garbage ADC sample would otherwise zero out TX power until the dialog is reopened.
+    if (myStatus->volts > 0.0f)
+    {
+        int voltLimitedMax = (int)floor(myStatus->volts / 31.0f * 260.0f + 0.5f);
+        if (voltLimitedMax < g_max_amp)
+        {
+            g_max_amp = voltLimitedMax;
+            g_abs_max_amp = (int)round(1.15 * g_max_amp);
+        }
+    }
+
+    SetRXBits(0);
+    Sleep(16);
+
+
     myStatus->mode = RX_MODE;
 }
 
@@ -2284,7 +2329,7 @@ void CRadio::AntTuneSweepOSL(int osl)
 
     SetFreq(lastLO);
 
-    SetRXBits();
+    SetRXBits(0);
 
     Sleep(16);
     writeData[0] = 'r';
@@ -2427,7 +2472,7 @@ void CRadio::AntTuneDataLoop()
     }
 
     SetFreq(lastLO);
-    SetRXBits();
+    SetRXBits(0);
     Sleep(16);
 
     writeData[0] = 'r';
@@ -2490,7 +2535,7 @@ void CRadio::SweepAntTune()
 		myStatus->UpdateVSWR = true;
 	}
 
-	SetRXBits();
+	SetRXBits(0);
 
 	Sleep(16);
 
@@ -2548,7 +2593,7 @@ void CRadio::QuickSync()
 
      }
 
-    SetRXBits();
+    SetRXBits(0);
 
     Sleep(16);
 
@@ -2684,18 +2729,19 @@ int CRadio::SetFreq(double freqMHz)
     return bytesWritten;
 }
 
-int CRadio::SetRXBits()
+int CRadio::SetRXBits(uint8_t rly)
 {
     char writeData[8];
     DWORD bytesWritten = 0;
 
     writeData[0] = 'c';
-    writeData[1] = 0x20 + RelaySettings;
+    writeData[1] = 0x20 + rly;
     writeData[2] = 0x20 + 0x3E; // actual input
 
-     WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // Set frequency
+    WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // Set frequency
     return bytesWritten;
 }
+
 
 int CRadio::Connect()
 {
@@ -2828,10 +2874,22 @@ int CRadio::Connect()
     WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); // Set frequency
     Sleep(100);
 
+    writeData[0] = 'a'; // ADC payload
+    WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // query adc values once
+    ReadFile(hSerial, readData, 4, &bytesWritten, NULL); // Read volt / current
+    UpdateADCs(readData);
+
+    is8S = (myStatus->volts > 27.0);
+    writeData[0] = 'z';
+    writeData[1] = (is8S)? 0x21 : 0x20;// Battery range
+    WriteFile(hSerial, writeData, 2, &bytesWritten, NULL); // 
+    Sleep(16);
+
+
     writeData[0] = 'c';
-    writeData[1] = 0x20 + RelaySettings; 
+    writeData[1] = 0x20;// +RelaySettings;
     writeData[2] = 0x20 + 0x3E; // RX
-    WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // queue up 8 * 250 IQ values
+    WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // 
     Sleep(16);
 
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);

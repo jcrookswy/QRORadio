@@ -161,7 +161,7 @@ public:
 	int comPort;
 	bool SaveSettings(const char* path);
 	bool LoadSettings(const char* path);
-	int SetRXBits();
+	int SetRXBits(uint8_t rly);
 //	int DoAudioFFT();
 
 	void ProcessIQ(char* data); // Change 4, 6-bit values into a float
@@ -199,6 +199,7 @@ public:
 	float agcMaxGain;
 	float agcTarget;
 	bool NewLOFreq;
+	bool is8S;
 
 	float RXChannelPower;  // 5-second peak channel power, center to +3 kHz
 
