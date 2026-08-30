@@ -2,6 +2,7 @@
 #include <thread>
 #include <cmath>
 #include <cctype>
+#include <wchar.h>
 #include <stddef.h>
 #include <ipp.h>
 #include <chrono>
@@ -168,6 +169,20 @@ bool CRadio::SaveSettings(const char* path)
     fprintf(f, "  \"RelaySettings\": %d,\n", RelaySettings);
     fprintf(f, "  \"myCallsign\": \"%s\",\n", myCallsign);
 
+    fprintf(f, "  \"contestID\": \"%s\",\n", contestID);
+    fprintf(f, "  \"exchangeTemplate\": %d,\n", exchangeTemplate);
+    fprintf(f, "  \"myExchange\": \"%s\",\n", myExchange);
+    fprintf(f, "  \"nextSerialSent\": %d,\n", nextSerialSent);
+    fprintf(f, "  \"categoryMode\": \"%s\",\n", categoryMode);
+    fprintf(f, "  \"categoryPower\": \"%s\",\n", categoryPower);
+    fprintf(f, "  \"operatorName\": \"%s\",\n", operatorName);
+    fprintf(f, "  \"addressLine\": \"%s\",\n", addressLine);
+    fprintf(f, "  \"addressCity\": \"%s\",\n", addressCity);
+    fprintf(f, "  \"addressState\": \"%s\",\n", addressState);
+    fprintf(f, "  \"addressPostal\": \"%s\",\n", addressPostal);
+    fprintf(f, "  \"addressCountry\": \"%s\",\n", addressCountry);
+    fprintf(f, "  \"claimedScore\": \"%s\",\n", claimedScore);
+
     const char*  names[]  = { "SweptOpen", "SweptShort", "SweptLoad", "SweptIQMu" };
     Ipp32fc*     arrays[] = { myVNACal->SweptOpen, myVNACal->SweptShort, myVNACal->SweptLoad, myVNACal->SweptIQMu };
     for (int a = 0; a < 4; a++)
@@ -196,12 +211,36 @@ bool CRadio::LoadSettings(const char* path)
     char line[256];
     while (fgets(line, sizeof(line), f))
     {
-        int ival; float fval, re, im; double dval = 0.0; char cval[16];
+        int ival; float fval, re, im; double dval = 0.0; char cval[16]; char cbuf[64];
         if      (sscanf_s(line, " \"comPort\": %d",       &ival) == 1) comPort       = ival;
         else if (sscanf_s(line, " \"LOfreq\": %lf",       &dval) == 1) LOfreq        = dval;
         else if (sscanf_s(line, " \"RelaySettings\": %d", &ival) == 1) RelaySettings = ival;
         else if (sscanf_s(line, " \"myCallsign\": \"%[^\"]\"", cval, (unsigned)sizeof(cval)) == 1)
             strncpy_s(myCallsign, sizeof(myCallsign), cval, _TRUNCATE);
+        else if (sscanf_s(line, " \"contestID\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(contestID, sizeof(contestID), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"exchangeTemplate\": %d", &ival) == 1) exchangeTemplate = ival;
+        else if (sscanf_s(line, " \"myExchange\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(myExchange, sizeof(myExchange), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"nextSerialSent\": %d", &ival) == 1) nextSerialSent = ival;
+        else if (sscanf_s(line, " \"categoryMode\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(categoryMode, sizeof(categoryMode), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"categoryPower\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(categoryPower, sizeof(categoryPower), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"operatorName\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(operatorName, sizeof(operatorName), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"addressLine\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(addressLine, sizeof(addressLine), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"addressCity\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(addressCity, sizeof(addressCity), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"addressState\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(addressState, sizeof(addressState), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"addressPostal\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(addressPostal, sizeof(addressPostal), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"addressCountry\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(addressCountry, sizeof(addressCountry), cbuf, _TRUNCATE);
+        else if (sscanf_s(line, " \"claimedScore\": \"%[^\"]\"", cbuf, (unsigned)sizeof(cbuf)) == 1)
+            strncpy_s(claimedScore, sizeof(claimedScore), cbuf, _TRUNCATE);
         else if (strstr(line, "\"SweptOpen\""))        { calSection = 0; calIdx = 0; }
         else if (strstr(line, "\"SweptShort\""))       { calSection = 1; calIdx = 0; }
         else if (strstr(line, "\"SweptLoad\""))        { calSection = 2; calIdx = 0; }
@@ -237,6 +276,20 @@ CRadio::CRadio()
     IQBalanceEnabled = true;
     memset(myCallsign, 0, sizeof(myCallsign));
 
+    memset(contestID, 0, sizeof(contestID));
+    exchangeTemplate = EXCH_NONE;
+    memset(myExchange, 0, sizeof(myExchange));
+    nextSerialSent = 1;
+    strncpy_s(categoryMode, sizeof(categoryMode), "SSB", _TRUNCATE);
+    strncpy_s(categoryPower, sizeof(categoryPower), "HIGH", _TRUNCATE);
+    memset(operatorName, 0, sizeof(operatorName));
+    memset(addressLine, 0, sizeof(addressLine));
+    memset(addressCity, 0, sizeof(addressCity));
+    memset(addressState, 0, sizeof(addressState));
+    memset(addressPostal, 0, sizeof(addressPostal));
+    memset(addressCountry, 0, sizeof(addressCountry));
+    memset(claimedScore, 0, sizeof(claimedScore));
+
     CWModeEnabled = false;
     // cwSquelch gates CWSlicer::signalDetect (see AssignCWSlicers): the sum of the phase-coherent
     // vector-sum magnitudes of dftOnHistory's newest 4 and oldest 4 entries ("signal"), times
@@ -266,6 +319,7 @@ CRadio::CRadio()
     memset(audioInBuf, 0, 65536);
     memset(audioOutBuf, 0, 65536);
     connected = false;
+    isRXOnly = true;
 
     NewLOFreq = false;
     RelaySettings = 0;// 31;
@@ -1617,9 +1671,9 @@ void CRadio::Get1280AudioSamples(float gain)
     if (!DEBUG_BUF_GENERATED)
     {
         pTwoToneAudio = ippsMalloc_32f(256);
-        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
+        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 3 * i / 256) + 0.4999 * cos(IPP_2PI * 8 * i / 256);
         //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.4999 * cos(IPP_2PI * 5 * i / 256) + 0.4999 * cos(IPP_2PI * 6 * i / 256);
-        for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.9999 * sin(IPP_2PI * 6 * i / 256) ;
+        //for (int i = 0; i < 256; i++) pTwoToneAudio[i] = 0.9999 * sin(IPP_2PI * 6 * i / 256) ;
         DEBUG_BUF_GENERATED = true;
     }
 
@@ -1696,7 +1750,7 @@ static void BandpassOneSided(Ipp32fc* pData)
 }
 
 int debug_xyz = 0;
-int g_min_amp = 19;// 32;
+int g_min_amp = 32;// 32;
 int g_max_amp = 200;// 240;
 int g_abs_max_amp = 230;// 276;
 
@@ -2856,6 +2910,8 @@ int CRadio::Connect()
     timeouts.WriteTotalTimeoutConstant = 50;
     timeouts.WriteTotalTimeoutMultiplier = 10;
     if (!SetCommTimeouts(hSerial, &timeouts)) {
+        MessageBox(NULL, L"Device not found. Check COM port settings", L"COM port error", MB_OK);
+
         sprintf_s(dbgText, "COMTMO ERR");
         CloseHandle(hSerial);
         goto SkipComPortStuff;
@@ -2886,10 +2942,17 @@ int CRadio::Connect()
     Sleep(16);
 
 
-    writeData[0] = 'c';
-    writeData[1] = 0x20;// +RelaySettings;
-    writeData[2] = 0x20 + 0x3E; // RX
-    WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // 
+    isRXOnly = (myStatus->volts < 12.5);
+    if (isRXOnly)
+    {
+        writeData[0] = 'h'; // Disable 24 V
+        WriteFile(hSerial, writeData, 1, &bytesWritten, NULL); // Set frequency
+        Sleep(16);
+    }
+	writeData[0] = 'c';
+	writeData[1] = 0x20;// +RelaySettings;
+	writeData[2] = 0x20 + 0x3E; // RX
+	WriteFile(hSerial, writeData, 3, &bytesWritten, NULL); // 
     Sleep(16);
 
     PurgeComm(hSerial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
@@ -2904,6 +2967,7 @@ SkipComPortStuff:
     //Pa_Sleep(1000);
     //err = Pa_StopStream(stream);
     if (err != paNoError) {
+        MessageBox(NULL, L"Audio Driver Fail. Check that mic is plugged in", L"Audio Error", MB_OK);
         sprintf_s(dbgText, "AUDIO ERR");
         return 0;
     }

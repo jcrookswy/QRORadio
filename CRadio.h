@@ -200,6 +200,7 @@ public:
 	float agcTarget;
 	bool NewLOFreq;
 	bool is8S;
+	bool isRXOnly;
 
 	float RXChannelPower;  // 5-second peak channel power, center to +3 kHz
 
@@ -390,6 +391,17 @@ public:
 	char myCallsign[16];
 	bool audioOutStarted;
 
+	// Contest / Cabrillo export settings
+	enum ContestExchangeType { EXCH_NONE = 0, EXCH_SERIAL, EXCH_FIELD_DAY, EXCH_STATE_SECTION };
+	char contestID[24];
+	int  exchangeTemplate;      // ContestExchangeType
+	char myExchange[32];        // constant "my" exchange: FD class+section, or QSO-party county/state
+	int  nextSerialSent;
+	char categoryMode[16];      // SSB / CW / MIXED
+	char categoryPower[16];     // QRP / LOW / HIGH
+	char operatorName[32];
+	char addressLine[48], addressCity[32], addressState[16], addressPostal[16], addressCountry[32];
+	char claimedScore[16];      // freeform, filled in by hand before export
 
 };
 

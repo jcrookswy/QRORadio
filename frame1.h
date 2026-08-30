@@ -116,6 +116,8 @@ enum {
     ID_CW_SQUELCH,
     ID_CW_HYSTERESIS,
     ID_MAX_AMP,
+    ID_CONTEST_SETTINGS,
+    ID_EXPORT_CABRILLO,
 };
 ///////////////////////////////////////////////////////////////////////////////
 /// Class MyFrame1
@@ -184,6 +186,8 @@ public:
     void OnAudioCESSBSetpoint(wxCommandEvent& event);
     void OnPlotSettings(wxCommandEvent& event);
     void OnMyCallsign(wxCommandEvent& event);
+    void OnContestSettings(wxCommandEvent& event);
+    void OnExportCabrillo(wxCommandEvent& event);
     void OnImageReject(wxCommandEvent& event);
     void OnCWMode(wxCommandEvent& event);
     void OnCWSquelch(wxCommandEvent& event);

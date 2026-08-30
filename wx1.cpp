@@ -650,6 +650,104 @@ void BasicDrawPane::render(wxDC& dc)
 
 ///////////////////////////////////////////////////////////////////////////
 
+class CabrilloSettingsDialog : public wxDialog
+{
+public:
+    CabrilloSettingsDialog(MyFrame* parent)
+        : wxDialog((wxWindow*)parent, wxID_ANY, _("Contest Settings"),
+                   wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
+        , m_parent(parent)
+    {
+        CRadio* r = parent->myRadio;
+
+        wxFlexGridSizer* grid = new wxFlexGridSizer(0, 2, 5, 8);
+        grid->AddGrowableCol(1);
+
+        auto AddRow = [&](const wxString& lbl, wxTextCtrl*& ctrl,
+                          const wxString& val, int maxLen) {
+            grid->Add(new wxStaticText(this, wxID_ANY, lbl),
+                      0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+            ctrl = new wxTextCtrl(this, wxID_ANY, val,
+                                  wxDefaultPosition, wxSize(220, -1));
+            ctrl->SetMaxLength(maxLen);
+            grid->Add(ctrl, 1, wxEXPAND);
+        };
+
+        AddRow(_("Contest ID:"), m_contestID, wxString(r->contestID, wxConvUTF8), 24);
+
+        grid->Add(new wxStaticText(this, wxID_ANY, _("Exchange Template:")),
+                  0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+        wxString choices[] = { _("None"), _("Serial Number"), _("Field Day (Class + Section)"), _("State/Section QSO Party") };
+        m_exchangeTemplate = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, 4, choices);
+        m_exchangeTemplate->SetSelection(r->exchangeTemplate);
+        grid->Add(m_exchangeTemplate, 1, wxEXPAND);
+
+        AddRow(_("My Exchange (fixed):"), m_myExchange, wxString(r->myExchange, wxConvUTF8), 32);
+        AddRow(_("Next Serial #:"),       m_nextSerial, wxString::Format("%d", r->nextSerialSent), 8);
+        AddRow(_("Category Mode:"),       m_categoryMode, wxString(r->categoryMode, wxConvUTF8), 16);
+        AddRow(_("Category Power:"),      m_categoryPower, wxString(r->categoryPower, wxConvUTF8), 16);
+        AddRow(_("Operator Name:"),       m_operatorName, wxString(r->operatorName, wxConvUTF8), 32);
+        AddRow(_("Address:"),             m_addressLine, wxString(r->addressLine, wxConvUTF8), 48);
+        AddRow(_("City:"),                m_addressCity, wxString(r->addressCity, wxConvUTF8), 32);
+        AddRow(_("State:"),                m_addressState, wxString(r->addressState, wxConvUTF8), 16);
+        AddRow(_("Postal Code:"),         m_addressPostal, wxString(r->addressPostal, wxConvUTF8), 16);
+        AddRow(_("Country:"),             m_addressCountry, wxString(r->addressCountry, wxConvUTF8), 32);
+        AddRow(_("Claimed Score:"),       m_claimedScore, wxString(r->claimedScore, wxConvUTF8), 16);
+
+        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(grid, 1, wxEXPAND | wxALL, 12);
+        wxBoxSizer* btnSizer = new wxBoxSizer(wxHORIZONTAL);
+        wxButton* ok = new wxButton(this, wxID_OK, _("OK"));
+        wxButton* cancel = new wxButton(this, wxID_CANCEL, _("Cancel"));
+        btnSizer->Add(ok, 0, wxALL, 4);
+        btnSizer->Add(cancel, 0, wxALL, 4);
+        sizer->Add(btnSizer, 0, wxALIGN_CENTER | wxBOTTOM, 8);
+        SetSizer(sizer);
+        Fit();
+
+        ok->Bind(wxEVT_BUTTON, &CabrilloSettingsDialog::OnOK, this);
+    }
+
+private:
+    MyFrame*    m_parent;
+    wxTextCtrl* m_contestID;
+    wxChoice*   m_exchangeTemplate;
+    wxTextCtrl* m_myExchange;
+    wxTextCtrl* m_nextSerial;
+    wxTextCtrl* m_categoryMode;
+    wxTextCtrl* m_categoryPower;
+    wxTextCtrl* m_operatorName;
+    wxTextCtrl* m_addressLine;
+    wxTextCtrl* m_addressCity;
+    wxTextCtrl* m_addressState;
+    wxTextCtrl* m_addressPostal;
+    wxTextCtrl* m_addressCountry;
+    wxTextCtrl* m_claimedScore;
+
+    void OnOK(wxCommandEvent&)
+    {
+        CRadio* r = m_parent->myRadio;
+        strncpy_s(r->contestID,      sizeof(r->contestID),      m_contestID->GetValue().Upper().ToStdString().c_str(), _TRUNCATE);
+        r->exchangeTemplate = m_exchangeTemplate->GetSelection();
+        strncpy_s(r->myExchange,     sizeof(r->myExchange),     m_myExchange->GetValue().Upper().ToStdString().c_str(), _TRUNCATE);
+        r->nextSerialSent = wxAtoi(m_nextSerial->GetValue());
+        if (r->nextSerialSent < 1) r->nextSerialSent = 1;
+        strncpy_s(r->categoryMode,   sizeof(r->categoryMode),   m_categoryMode->GetValue().Upper().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->categoryPower,  sizeof(r->categoryPower),  m_categoryPower->GetValue().Upper().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->operatorName,   sizeof(r->operatorName),   m_operatorName->GetValue().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->addressLine,    sizeof(r->addressLine),    m_addressLine->GetValue().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->addressCity,    sizeof(r->addressCity),    m_addressCity->GetValue().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->addressState,   sizeof(r->addressState),   m_addressState->GetValue().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->addressPostal,  sizeof(r->addressPostal),  m_addressPostal->GetValue().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->addressCountry, sizeof(r->addressCountry), m_addressCountry->GetValue().ToStdString().c_str(), _TRUNCATE);
+        strncpy_s(r->claimedScore,   sizeof(r->claimedScore),   m_claimedScore->GetValue().ToStdString().c_str(), _TRUNCATE);
+        r->SaveSettings("settings.json");
+        EndModal(wxID_OK);
+    }
+};
+
+///////////////////////////////////////////////////////////////////////////
+
 class LogDialog : public wxDialog
 {
 public:
@@ -687,6 +785,26 @@ public:
         AddRow(_("Freq (MHz):"),     m_freq,    wxString(freqBuf),           12);
         AddRow(_("Band:"),           m_band,    _("20m"),                     8);
         AddRow(_("Mode:"),           m_mode,    _("USB"),                     8);
+
+        // Contest exchange row(s), shown only when a contest exchange template is active
+        m_exchTemplate = parent->myRadio->exchangeTemplate;
+        m_serialSent = m_serialRcvd = m_fdClass = m_fdSection = m_stateSection = nullptr;
+        switch (m_exchTemplate)
+        {
+        case CRadio::EXCH_SERIAL:
+            AddRow(_("Serial Sent:"), m_serialSent, wxString::Format("%03d", parent->myRadio->nextSerialSent), 8);
+            AddRow(_("Serial Rcvd:"), m_serialRcvd, wxEmptyString, 8);
+            break;
+        case CRadio::EXCH_FIELD_DAY:
+            AddRow(_("Their Class:"),   m_fdClass,   wxEmptyString, 8);
+            AddRow(_("Their Section:"), m_fdSection, wxEmptyString, 8);
+            break;
+        case CRadio::EXCH_STATE_SECTION:
+            AddRow(_("Their County/State:"), m_stateSection, wxEmptyString, 16);
+            break;
+        default:
+            break;
+        }
 
         // POTA row: checkbox + park field on the last grid row
         m_potaCheck = new wxCheckBox(this, wxID_ANY, _("POTA"));
@@ -746,6 +864,12 @@ private:
     wxTextCtrl* m_freq;
     wxTextCtrl* m_band;
     wxTextCtrl* m_mode;
+    int         m_exchTemplate;
+    wxTextCtrl* m_serialSent;
+    wxTextCtrl* m_serialRcvd;
+    wxTextCtrl* m_fdClass;
+    wxTextCtrl* m_fdSection;
+    wxTextCtrl* m_stateSection;
 
     void SavePotaState()
     {
@@ -814,8 +938,34 @@ private:
             rec += AdifField("SIG",      "POTA");
             rec += AdifField("SIG_INFO", m_p2pPark->GetValue().ToStdString());
         }
+
+        if (m_exchTemplate != CRadio::EXCH_NONE)
+        {
+            rec += AdifField("CONTEST_ID", m_parent->myRadio->contestID);
+            switch (m_exchTemplate)
+            {
+            case CRadio::EXCH_SERIAL:
+                rec += AdifField("STX", m_serialSent->GetValue().ToStdString());
+                rec += AdifField("SRX", m_serialRcvd->GetValue().ToStdString());
+                break;
+            case CRadio::EXCH_FIELD_DAY:
+                rec += AdifField("CLASS",      m_fdClass->GetValue().Upper().ToStdString());
+                rec += AdifField("ARRL_SECT",  m_fdSection->GetValue().Upper().ToStdString());
+                break;
+            case CRadio::EXCH_STATE_SECTION:
+                rec += AdifField("SRX_STRING", m_stateSection->GetValue().Upper().ToStdString());
+                break;
+            }
+        }
+
         rec += "<EOR>\n";
         f << rec;
+
+        if (m_exchTemplate == CRadio::EXCH_SERIAL)
+        {
+            m_parent->myRadio->nextSerialSent++;
+            m_parent->myRadio->SaveSettings("settings.json");
+        }
 
         SavePotaState();
         Destroy();
@@ -873,6 +1023,111 @@ static std::vector<std::map<std::string, std::string>> ParseAdif(const char* pat
         }
     }
     return records;
+}
+
+// One-way ADIF -> Cabrillo v3 converter. Reads log.adi (via ParseAdif) and keeps only
+// records tagged with CONTEST_ID matching the currently-configured contest, so casual/POTA
+// QSOs logged in the same file never leak into a contest submission.
+static void WriteCabrilloLog(MyFrame* frame, const wxString& outPath)
+{
+    CRadio* r = frame->myRadio;
+    auto records = ParseAdif("log.adi");
+
+    std::ofstream f(outPath.ToStdString());
+    if (!f.is_open())
+    {
+        wxMessageBox(_("Could not open output file for writing."), _("Export Cabrillo"), wxOK | wxICON_ERROR, frame);
+        return;
+    }
+
+    f << "START-OF-LOG: 3.0\n";
+    f << "CALLSIGN: "            << r->myCallsign     << "\n";
+    f << "CONTEST: "             << r->contestID      << "\n";
+    f << "CATEGORY-BAND: 20M\n";
+    f << "CATEGORY-MODE: "       << r->categoryMode   << "\n";
+    f << "CATEGORY-POWER: "      << r->categoryPower  << "\n";
+    f << "CATEGORY-OPERATOR: SINGLE-OP\n";
+    f << "CLAIMED-SCORE: "       << r->claimedScore   << "\n";
+    f << "NAME: "                << r->operatorName   << "\n";
+    f << "ADDRESS: "             << r->addressLine    << "\n";
+    f << "ADDRESS-CITY: "        << r->addressCity    << "\n";
+    f << "ADDRESS-STATE: "       << r->addressState   << "\n";
+    f << "ADDRESS-POSTALCODE: "  << r->addressPostal  << "\n";
+    f << "ADDRESS-COUNTRY: "     << r->addressCountry << "\n";
+    f << "CREATED-BY: QRO20 Radio ADIF-Cabrillo Converter\n";
+
+    int exported = 0, skippedOther = 0, skippedFields = 0;
+    for (auto& rec : records)
+    {
+        auto get = [&](const char* k) -> std::string {
+            auto it = rec.find(k); return it != rec.end() ? it->second : "";
+        };
+
+        std::string contestId = get("CONTEST_ID");
+        if (contestId.empty() || contestId != r->contestID) { skippedOther++; continue; }
+
+        std::string call = get("CALL");
+        std::string date = get("QSO_DATE");
+        std::string time = get("TIME_ON");
+        if (call.empty() || date.size() != 8 || time.size() < 4) { skippedFields++; continue; }
+
+        std::string mycall = get("STATION_CALLSIGN");
+        if (mycall.empty()) mycall = r->myCallsign;
+
+        double mhz = 0.0;
+        try { mhz = std::stod(get("FREQ")); } catch (...) {}
+        long khz = std::lround(mhz * 1000.0);
+
+        std::string adifMode = get("MODE");
+        for (auto& c : adifMode) c = (char)toupper((unsigned char)c);
+        std::string cabMode = (adifMode == "CW")    ? "CW" :
+                               (adifMode == "FM")    ? "FM" :
+                               (adifMode == "RTTY")  ? "RY" : "PH";
+
+        std::string cabDate = date.substr(0, 4) + "-" + date.substr(4, 2) + "-" + date.substr(6, 2);
+        std::string cabTime = time.substr(0, 4);
+
+        std::string rstSent = get("RST_SENT");
+        std::string rstRcvd = get("RST_RCVD");
+
+        std::string sentExch, rcvdExch;
+        switch (r->exchangeTemplate)
+        {
+        case CRadio::EXCH_SERIAL:
+            sentExch = get("STX");
+            rcvdExch = get("SRX");
+            break;
+        case CRadio::EXCH_FIELD_DAY:
+        {
+            sentExch = r->myExchange; // constant "CLASS SECTION" for the whole operation
+            std::string cls = get("CLASS"), sect = get("ARRL_SECT");
+            rcvdExch = cls + ((cls.empty() || sect.empty()) ? "" : " ") + sect;
+            break;
+        }
+        case CRadio::EXCH_STATE_SECTION:
+            sentExch = r->myExchange;
+            rcvdExch = get("SRX_STRING");
+            break;
+        default:
+            break;
+        }
+
+        f << "QSO: " << khz << " " << cabMode << " " << cabDate << " " << cabTime << " "
+          << mycall << " " << rstSent;
+        if (!sentExch.empty()) f << " " << sentExch;
+        f << " " << call << " " << rstRcvd;
+        if (!rcvdExch.empty()) f << " " << rcvdExch;
+        f << "\n";
+        exported++;
+    }
+
+    f << "END-OF-LOG:\n";
+    f.close();
+
+    wxMessageBox(wxString::Format(
+        _("Exported %d QSOs to %s.\n%d skipped (different/missing contest), %d skipped (missing call/date/time)."),
+        exported, outPath, skippedOther, skippedFields),
+        _("Export Cabrillo"), wxOK | wxICON_INFORMATION, frame);
 }
 
 class LogViewDialog : public wxDialog
@@ -1023,6 +1278,9 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     wxMenu* fileMenu = new wxMenu();
     fileMenu->Append(wxID_OPEN, _("&Load...\tCtrl+O"));
     fileMenu->Append(wxID_SAVE, _("&Save...\tCtrl+S"));
+    fileMenu->AppendSeparator();
+    fileMenu->Append(ID_CONTEST_SETTINGS, _("&Contest Settings..."));
+    fileMenu->Append(ID_EXPORT_CABRILLO,  _("&Export Cabrillo Log..."));
     menuBar->Append(fileMenu, _("&File"));
     wxMenu* radioMenu = new wxMenu();
     radioMenu->Append(ID_RADIO_SET_COM, _("Set COM &port..."));
@@ -1054,6 +1312,8 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
     Bind(wxEVT_MENU, &MyFrame::OnFileSave,   this, wxID_SAVE);
     Bind(wxEVT_MENU, &MyFrame::OnSetComPort,  this, ID_RADIO_SET_COM);
     Bind(wxEVT_MENU, &MyFrame::OnMyCallsign,  this, ID_MY_CALLSIGN);
+    Bind(wxEVT_MENU, &MyFrame::OnContestSettings, this, ID_CONTEST_SETTINGS);
+    Bind(wxEVT_MENU, &MyFrame::OnExportCabrillo,  this, ID_EXPORT_CABRILLO);
     Bind(wxEVT_MENU, &MyFrame::OnImageReject,  this, ID_IMAGE_REJECT);
     Bind(wxEVT_MENU, &MyFrame::OnCWMode,       this, ID_CW_MODE);
     Bind(wxEVT_MENU, &MyFrame::OnCWSquelch,    this, ID_CW_SQUELCH);
@@ -1284,6 +1544,7 @@ MyFrame::MyFrame(wxWindow* parent, wxWindowID id, const wxString& title, const w
 
     SPtoTX = true;
     antTuneRun = false;
+    m_button3->Enable(false);
     m_button4->Enable(false);
     Bind(wxEVT_CHAR_HOOK, &MyFrame::OnCharHook, this);
 //    m_button1->Enable();
@@ -1346,6 +1607,29 @@ void MyFrame::OnMyCallsign(wxCommandEvent& event)
     strncpy_s(myRadio->myCallsign, sizeof(myRadio->myCallsign),
               m_myCallsign.ToStdString().c_str(), _TRUNCATE);
     myRadio->SaveSettings("settings.json");
+}
+
+void MyFrame::OnContestSettings(wxCommandEvent& event)
+{
+    CabrilloSettingsDialog dlg(this);
+    dlg.ShowModal();
+}
+
+void MyFrame::OnExportCabrillo(wxCommandEvent& event)
+{
+    if (myRadio->exchangeTemplate == CRadio::EXCH_NONE || myRadio->contestID[0] == '\0')
+    {
+        wxMessageBox(_("Set a Contest ID and Exchange Template in Contest Settings first."),
+                     _("Export Cabrillo"), wxOK | wxICON_WARNING, this);
+        return;
+    }
+
+    wxString defaultName = wxString(myRadio->contestID, wxConvUTF8) + _(".log");
+    wxFileDialog dlg(this, _("Export Cabrillo Log"), wxEmptyString, defaultName,
+        _("Cabrillo files (*.log)|*.log"), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() == wxID_CANCEL) return;
+
+    WriteCabrilloLog(this, dlg.GetPath());
 }
 
 void MyFrame::OnImageReject(wxCommandEvent& event)
@@ -1562,6 +1846,7 @@ void MyFrame::B1Click(wxCommandEvent& event) // CONNECT
     if (retval)
     {
         m_button1->SetLabelText(_(" CONNECTED "));
+        m_button3->Enable(!myRadio->isRXOnly);
     }
 
     m_panel1->Refresh(false);
