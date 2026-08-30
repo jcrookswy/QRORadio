@@ -201,6 +201,7 @@ public:
 	bool NewLOFreq;
 	bool is8S;
 	bool isRXOnly;
+	bool hasTransmitted;
 
 	float RXChannelPower;  // 5-second peak channel power, center to +3 kHz
 

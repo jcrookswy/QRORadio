@@ -198,6 +198,7 @@ public:
     void BViewLogClick(wxCommandEvent& event);
     void BCWPeakClick(wxCommandEvent& event);
     void UpdateDebugText(char* text);
+    void UpdateTransmitEnable();
 
     CRadio*   myRadio;
     bool      SPtoTX;

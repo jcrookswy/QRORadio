@@ -529,7 +529,8 @@ void BasicDrawPane::render(wxDC& dc)
 
         wchar_t txText[16];
         char voltText[16];
-        float watts = pRadio->myStatus->volts * pRadio->myStatus->amps;
+        float displayAmps = pRadio->hasTransmitted ? pRadio->myStatus->amps : 0.0f;
+        float watts = pRadio->myStatus->volts * displayAmps;
         if (watts < 10.0)
             sprintf_s(voltText, "%.1fV %.1fW", pRadio->myStatus->volts, watts);
         else
@@ -1722,13 +1723,16 @@ void MyFrame::OnCWHysteresis(wxCommandEvent& event)
 
 void MyFrame::OnMaxAmp(wxCommandEvent& event)
 {
+    // Power scales with amplitude^2, so the amp code (125-250) is 250 * sqrt(percent),
+    // with 25% power = 125 (min) and 100% power = 250 (max, hardware full scale).
+    long currentPercent = (long)round(100.0 * pow(g_max_amp / 250.0, 2.0));
     long val = wxGetNumberFromUser(
-        _("Max TX amplitude code (0-260):"),
-        _("Max Amp:"),
+        _("Max TX power (25-100%):"),
+        _("Max Power %:"),
         _("Max Amp"),
-        g_max_amp, 0, 260, this);
+        currentPercent, 25, 100, this);
     if (val < 0) return;
-    g_max_amp = (int)val;
+    g_max_amp = (int)round(250.0 * sqrt(val / 100.0));
     g_abs_max_amp = (int)round(1.15 * g_max_amp);
 }
 
@@ -1814,7 +1818,7 @@ void MyFrame::OnTimer(wxTimerEvent& event)
         if (prevMode == VNA_MODE && curMode == RX_MODE)
         {
             antTuneRun = true;
-            m_button4->Enable(true);
+            UpdateTransmitEnable();
         }
         prevMode = curMode;
     }
@@ -1831,6 +1835,26 @@ void MyFrame::OnTimer(wxTimerEvent& event)
         wxMessageBox(wxString::Format("Peak frequency: %.0f Hz", myRadio->CWPeakFreq),
                      "CW Peaking", wxOK | wxICON_INFORMATION, this);
     }
+}
+
+void MyFrame::UpdateTransmitEnable()
+{
+    if (!antTuneRun) return;
+
+    double pos = (myRadio->LOfreq - 14.0) / 0.01;
+    int idx0 = (int)floor(pos);
+    if (idx0 < 0)  idx0 = 0;
+    if (idx0 > 34) idx0 = 34;
+    int idx1 = idx0 + 1;
+    double frac = pos - idx0;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+
+    float vswr0 = myRadio->myStatus->SWRTuned[idx0];
+    float vswr1 = myRadio->myStatus->SWRTuned[idx1];
+    float vswrInterp = vswr0 + (float)((vswr1 - vswr0) * frac);
+
+    m_button4->Enable(vswrInterp < 1.5f);
 }
 
 void MyFrame::B1Click(wxCommandEvent& event) // CONNECT
@@ -1908,6 +1932,7 @@ void MyFrame::B6Click(wxCommandEvent& event) // MHz
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
+    UpdateTransmitEnable();
 }
 
 void MyFrame::B7Click(wxCommandEvent& event) // Step down
@@ -1918,6 +1943,7 @@ void MyFrame::B7Click(wxCommandEvent& event) // Step down
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
+    UpdateTransmitEnable();
 }
 
 void MyFrame::B8Click(wxCommandEvent& event) // Step up
@@ -1928,6 +1954,7 @@ void MyFrame::B8Click(wxCommandEvent& event) // Step up
     m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
     myRadio->NewLOFreq = true;
     myRadio->myStatus->UpdateText = true;
+    UpdateTransmitEnable();
 }
 
 void MyFrame::B9Click(wxCommandEvent& event) // Hz (update step size)
@@ -1985,6 +2012,7 @@ void MyFrame::OnCharHook(wxKeyEvent& event)
             m_textCtrl1->SetValue(wxString::Format("%.4f", myRadio->LOfreq));
             myRadio->NewLOFreq = true;
             myRadio->myStatus->UpdateText = true;
+            UpdateTransmitEnable();
             return;
         }
     }

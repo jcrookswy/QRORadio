@@ -320,6 +320,7 @@ CRadio::CRadio()
     memset(audioOutBuf, 0, 65536);
     connected = false;
     isRXOnly = true;
+    hasTransmitted = false;
 
     NewLOFreq = false;
     RelaySettings = 0;// 31;
@@ -1024,6 +1025,8 @@ void CRadio::StartCWTransmit(const char* text)
 // resampler itself only ever has to handle the smooth envelope, never an oscillating signal.
 void CRadio::CWTXDataLoop()
 {
+    hasTransmitted = true;
+
     char writeData[132]; // 1 header + 32 IQ pairs x 4 bytes = 129 bytes
     char readData[64];
     DWORD bytesWritten = 0;
@@ -1751,8 +1754,8 @@ static void BandpassOneSided(Ipp32fc* pData)
 
 int debug_xyz = 0;
 int g_min_amp = 32;// 32;
-int g_max_amp = 200;// 240;
-int g_abs_max_amp = 230;// 276;
+int g_max_amp = 177;// 50% power (250 * sqrt(0.5))
+int g_abs_max_amp = 204;// 1.15 * g_max_amp
 
 static int gTXPacketLastPhase = 0;
 static float gTXPacketRemainder = 0.0f;
@@ -1974,6 +1977,8 @@ DWORD GetBytesAvailable(HANDLE hComm) {
 
 void CRadio::TXDataLoop()
 {
+    hasTransmitted = true;
+
     char writeData[132]; // 1 header + 32 IQ pairs × 4 bytes = 129 bytes
     char readData[64];
     DWORD bytesWritten = 0;
