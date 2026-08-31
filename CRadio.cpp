@@ -1,3 +1,21 @@
+// QRO20 - HF SDR transceiver control software
+// Copyright (C) 2026  Justin Crooks
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 #include "CRadio.h"
 #include <thread>
 #include <cmath>
@@ -2817,9 +2835,9 @@ int CRadio::Connect()
     fscanf_s(f, "%d", &AudioInputChannels);
  //   fscanf_s(f, "%f", &LOfreq);
     fscanf_s(f, "%d", &RelaySettings);
-    comPort = port;
     fclose(f);
-    
+    comPort = port;
+
     //debug
     DWORD WriteData4[16];
     char writeData[64];
